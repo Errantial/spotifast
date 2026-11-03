@@ -120,11 +120,11 @@ sleeps with `ControlFlow::WaitUntil` or polls when uncapped
 Consequences at 8.33 ms frames:
 
 - **No phase lock to the compositor.** A frame that lands a millisecond after
-  a vblank waits a whole refresh: at 120 Hz that is 8.33 ms of extra latency
-  and a visible hitch, while at 60 Hz the same miss costs 16.7 ms but happens
-  half as often relative to the beat. Timer wake-up error (~1 ms typical, OS
-  dependent) is 12% of a 120 Hz frame and 6% of a 60 Hz one. This is the main
-  stability risk on Windows and Wayland, independent of GPU cost.
+  a vblank waits a whole refresh: 8.33 ms at 120 Hz, 16.7 ms at 60 Hz. The
+  same timer error is therefore twice as large a share of the frame at 120,
+  so the same OS wake-up jitter (typically around a millisecond, OS
+  dependent) is 12% of a 120 Hz frame against 6% of a 60 Hz one. This is the
+  main stability risk on Windows and Wayland, independent of GPU cost.
 - **Windows**: a WGL swap with interval 0 goes through DWM, which still
   presents on the monitor's vblank. Frames that miss the beat are dropped or
   wait, so in the worst case the cadence becomes 120 with occasional
@@ -139,8 +139,9 @@ Consequences at 8.33 ms frames:
   pacing by frame callbacks is about eframe's window, not this child (the
   child uses glutin directly), but the rule "Do not add a vsync decision of
   our own" still applies to the app's window.
-- **Uncapped (0)** is a `Poll` loop: one core at 100% plus the GPU. It is not
-  a 120 fps mode; 120 should be selected explicitly.
+- **Uncapped (0)** is a `Poll` loop, so it keeps a CPU core busy and draws
+  as fast as the driver allows. It is not a 120 fps mode; 120 should be
+  selected explicitly.
 
 ### 1.5 Measurements (llvmpipe, relative only)
 
