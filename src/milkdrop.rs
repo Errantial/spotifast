@@ -25,6 +25,9 @@ pub mod engine;
 /// Finished frames in shared memory, from the child to a skin's pane.
 #[cfg(feature = "milkdrop")]
 pub mod frames;
+/// Whether a fade has to give up detail to keep the frame rate.
+#[cfg(feature = "milkdrop")]
+mod governor;
 /// The app's side of the child process: spawning it and talking to it.
 #[cfg(feature = "milkdrop")]
 pub mod host;
@@ -150,6 +153,8 @@ pub struct Presets {
     pending: Option<Request>,
     /// When the playing preset was asked for, which its time counts from.
     started: Instant,
+    /// When a fade into the playing preset began, while one is still running.
+    fading_since: Option<Instant>,
     download: Option<(&'static str, mpsc::Receiver<Result<usize, String>>)>,
 }
 
@@ -171,6 +176,7 @@ impl Presets {
             random: true,
             pending: None,
             started: Instant::now(),
+            fading_since: None,
             download: None,
         }
     }
@@ -254,6 +260,14 @@ impl Presets {
         }
     }
 
+    /// Whether a fade into the playing preset is still running: projectM
+    /// takes [`CROSSFADE_SECONDS`] from the moment the preset was asked for.
+    pub fn fading(&self, now: Instant) -> bool {
+        self.fading_since.is_some_and(|started| {
+            now.saturating_duration_since(started) < Duration::from_secs_f64(CROSSFADE_SECONDS)
+        })
+    }
+
     /// Back to the preset before this one.
     pub fn previous(&mut self) {
         if self.at == 0 {
@@ -297,6 +311,7 @@ impl Presets {
                 smooth,
             });
             self.started = Instant::now();
+            self.fading_since = smooth.then_some(self.started);
         }
     }
 
@@ -593,6 +608,38 @@ mod tests {
         assert_eq!(asked_for(&mut presets), None);
         presets.advance(start + Duration::from_secs_f64(CROSSFADE_SECONDS), 2);
         assert!(asked_for(&mut presets).is_some());
+    }
+
+    /// A soft cut is known to be running for exactly the fade's length, and a
+    /// hard cut is over as it starts, so nothing shrinks the picture around
+    /// one.
+    #[test]
+    fn a_fade_is_known_while_it_runs() {
+        let mut presets = Presets::new();
+        presets.files = vec![PathBuf::from("a.milk"), PathBuf::from("b.milk")];
+        presets.random = false;
+        presets.next(true);
+        presets.take_request();
+        let started = presets.started;
+        assert!(!presets.fading(started), "a hard cut is over as it starts");
+
+        presets.next(false);
+        let started = presets.started;
+        assert!(presets.fading(started));
+        assert!(presets.fading(started + Duration::from_secs(1)));
+        assert!(
+            !presets.fading(started + Duration::from_secs_f64(CROSSFADE_SECONDS)),
+            "the fade is over when its time is"
+        );
+
+        // Previous fades too; a hard cut and a reload do not.
+        presets.previous();
+        assert!(presets.fading(Instant::now()));
+        presets.next(true);
+        assert!(!presets.fading(Instant::now()), "a hard cut does not fade");
+        presets.previous();
+        presets.reload_current();
+        assert!(!presets.fading(Instant::now()), "a reload cuts in");
     }
 
     fn temp_dir(name: &str) -> PathBuf {

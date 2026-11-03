@@ -27,9 +27,14 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, ResizeDirection, Window, WindowId};
 
 use super::engine::Engine;
+use super::governor::Governor;
 use super::overlay::{Backing, Overlay, Place, Row, Span};
 use super::shm::Ring;
 use super::{DEFAULT_FPS, DEFAULT_SECONDS, LAG, MIN_SIZE, Presets, Request};
+
+/// The smallest picture the settings and the fade's own governor may ask for
+/// together: a quarter of the width and height, which is already a mosaic.
+const MAX_SCALE: u32 = 4;
 
 /// What the child is told to do, on stdin, as one JSON object per line.
 #[derive(Debug, Default, Deserialize)]
@@ -215,6 +220,9 @@ struct Child {
     /// Current screen refresh rate, when reported.
     screen_hz: Option<f32>,
     scale: u32,
+    /// Whether a fade has to be drawn with less detail than the setting asks
+    /// for to keep the frame rate.
+    quality: Governor,
     seconds: u32,
     pointer: PhysicalPosition<f64>,
     last_click: Option<Instant>,
@@ -253,6 +261,7 @@ impl Child {
             modifiers: winit::keyboard::ModifiersState::empty(),
             fps,
             scale,
+            quality: Governor::new(),
             seconds,
             pointer: PhysicalPosition::new(0.0, 0.0),
             last_click: None,
@@ -290,6 +299,14 @@ impl Child {
     /// number of frames a second, or nothing at all when uncapped.
     fn frame_interval(&self) -> Option<Duration> {
         (self.fps != 0).then(|| Duration::from_secs_f32(1.0 / self.fps as f32))
+    }
+
+    /// What a frame may cost before a fade is drawn with less detail: the
+    /// limit it was asked to keep, or the 60 frames a second projectM is told
+    /// about when the limit is uncapped.
+    fn frame_budget(&self) -> Duration {
+        self.frame_interval()
+            .unwrap_or_else(|| Duration::from_secs_f32(1.0 / 60.0))
     }
 
     /// Asks the screen the window is on how often it refreshes.
@@ -353,6 +370,20 @@ impl Child {
     }
 
     fn render(&mut self) {
+        if self.live.is_none() {
+            return;
+        }
+        let started = Instant::now();
+        // Read before `prepare_frame` moves the presets on: a fade that
+        // begins with this frame is measured from the one after it, so the
+        // preset load itself is not mistaken for the fade being too heavy.
+        let fading = self.presets.fading(started);
+        let budget = self.frame_budget();
+        let scale = self
+            .scale
+            .max(1)
+            .saturating_mul(self.quality.scale())
+            .min(MAX_SCALE);
         let Some(live) = &mut self.live else {
             return;
         };
@@ -365,13 +396,8 @@ impl Child {
             &mut self.cursor,
         );
         let size = live.window.inner_size();
-        live.engine.render(
-            0,
-            0,
-            size.width.max(1),
-            size.height.max(1),
-            self.scale.max(1),
-        );
+        live.engine
+            .render(0, 0, size.width.max(1), size.height.max(1), scale);
         if let Some(overlay) = &mut live.overlay {
             overlay.draw(&live.gl, (size.width, size.height));
         }
@@ -385,6 +411,8 @@ impl Child {
         if let Err(error) = live.surface.swap_buffers(&live.context) {
             eprintln!("MilkDrop: present failed: {error}");
         }
+        self.quality
+            .observe(Instant::now(), started.elapsed(), fading, budget);
         self.update_corners();
         self.report_geometry();
     }
@@ -468,7 +496,7 @@ impl ApplicationHandler<Control> for Child {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, control: Control) {
         if let Some(scale) = control.scale {
-            self.scale = scale.clamp(1, 4);
+            self.scale = scale.clamp(1, MAX_SCALE);
         }
         if let Some(song) = control.song
             && self.song.as_ref() != Some(&song)
