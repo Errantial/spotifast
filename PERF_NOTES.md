@@ -228,8 +228,6 @@ a real display's vertical blank.
 
 ## What is relative only
 
-
-
 - Absolute frame times (45 to 70 ms steady) are llvmpipe drawing on the
   CPU at 13 to 14 fps, not a GPU at 60. The 60 fps pacing is requested but
   not reached on this host.
