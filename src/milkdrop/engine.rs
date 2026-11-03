@@ -6,8 +6,8 @@
 //! The engine is dropped from eframe's exit hook while the context is current.
 
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use eframe::glow::{self, HasContext};
 use projectm_sys as pm;
@@ -21,6 +21,10 @@ pub struct Engine {
     gl: Arc<glow::Context>,
     copy: Option<Copy>,
     seconds: u32,
+    /// The preset being handed over as bytes, which projectM reports a
+    /// failure for without a filename. Boxed so its address does not move
+    /// with the engine, which is the pointer the failure callback holds.
+    loading: Box<Mutex<Option<PathBuf>>>,
 }
 
 /// A framebuffer the picture's size, with the texture it draws into.
@@ -38,7 +42,7 @@ unsafe impl Send for Engine {}
 unsafe extern "C" fn switch_failed(
     preset_filename: *const c_char,
     message: *const c_char,
-    _user_data: *mut c_void,
+    user_data: *mut c_void,
 ) {
     let text = |pointer: *const c_char| {
         if pointer.is_null() {
@@ -50,11 +54,23 @@ unsafe extern "C" fn switch_failed(
                 .into_owned()
         }
     };
-    log::warn!(
-        "MilkDrop could not load {}: {}",
-        text(preset_filename),
-        text(message)
-    );
+    let mut name = text(preset_filename);
+    if name.is_empty() && !user_data.is_null() {
+        // A preset handed over as bytes has no filename in projectM's
+        // report; the engine knows which preset it was loading.
+        // SAFETY: the pointer is the engine's own box, live for the
+        // handle, and the callback runs inside the load that set it.
+        let loading = unsafe { &*user_data.cast::<Mutex<Option<PathBuf>>>() };
+        if let Ok(loading) = loading.lock()
+            && let Some(path) = loading.as_ref()
+        {
+            name = path.display().to_string();
+        }
+    }
+    if name.is_empty() {
+        name = "a preset read ahead".to_string();
+    }
+    log::warn!("MilkDrop could not load {name}: {}", text(message));
 }
 
 #[cfg(windows)]
@@ -85,12 +101,16 @@ impl Engine {
             log::warn!("projectM could not start: MilkDrop needs OpenGL 3.3");
             return None;
         }
+        let loading: Box<Mutex<Option<PathBuf>>> = Box::new(Mutex::new(None));
+        let loading_data = (&*loading as *const Mutex<Option<PathBuf>>)
+            .cast_mut()
+            .cast::<c_void>();
         // SAFETY: a fresh handle.
         unsafe {
             pm::projectm_set_preset_switch_failed_event_callback(
                 handle,
                 Some(switch_failed),
-                std::ptr::null_mut(),
+                loading_data,
             );
             // `Presets::advance` decides when a preset ends. This is what
             // a preset reads as its `progress`, kept exact: left alone,
@@ -110,6 +130,7 @@ impl Engine {
             gl,
             copy: None,
             seconds,
+            loading,
         };
         engine.set_texture_dirs(texture_dirs);
         Some(engine)
@@ -148,6 +169,30 @@ impl Engine {
         };
         // SAFETY: a live handle and a string that lives for the call.
         unsafe { pm::projectm_load_preset_file(self.handle, path.as_ptr(), smooth) };
+    }
+
+    /// Loads a preset from bytes read ahead of time, fading into it or
+    /// cutting straight to it. `false` when the bytes cannot be handed over
+    /// (a NUL inside, which a C string cannot carry): the caller then reads
+    /// the file itself, as it always did.
+    pub fn load_data(&mut self, path: &Path, data: Vec<u8>, smooth: bool) -> bool {
+        let Ok(data) = CString::new(data) else {
+            return false;
+        };
+        self.remember_loading(Some(path));
+        // SAFETY: a live handle and a string that lives for the call, which
+        // parses the preset before returning.
+        unsafe { pm::projectm_load_preset_data(self.handle, data.as_ptr(), smooth) };
+        self.remember_loading(None);
+        true
+    }
+
+    /// Names the preset a load from memory is for, so a failure it reports
+    /// with no filename can still say which one.
+    fn remember_loading(&self, path: Option<&Path>) {
+        if let Ok(mut loading) = self.loading.lock() {
+            *loading = path.map(Path::to_path_buf);
+        }
     }
 
     /// Feeds projectM stereo frames (LRLR pairs), from the shared ring.

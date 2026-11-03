@@ -19,6 +19,7 @@ use super::Presets;
 use super::child::{Args, prepare_frame};
 use super::engine::Engine;
 use super::frames::Frames;
+use super::prefetch::Prefetch;
 use super::shm::Ring;
 
 /// How long the app may go without showing the picture before the child
@@ -40,6 +41,7 @@ struct Pump {
     frames: Frames,
     folder: PathBuf,
     presets: Presets,
+    prefetch: Prefetch,
     closing: Arc<AtomicBool>,
     beats: u64,
     watched: Instant,
@@ -57,6 +59,7 @@ impl Pump {
             frames,
             folder: args.presets.clone(),
             presets: Presets::new(),
+            prefetch: Prefetch::start(),
             closing,
             beats: 0,
             watched: Instant::now(),
@@ -111,6 +114,7 @@ impl Pump {
             self.seconds,
             &self.ring,
             &mut self.cursor,
+            &mut self.prefetch,
         );
         // Nothing to draw for until the app has measured its pane, and
         // nothing worth showing before a preset plays.

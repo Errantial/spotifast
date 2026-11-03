@@ -36,6 +36,9 @@ pub mod overlay;
 /// The app's side of a pane's picture: the stream of frames and its child.
 #[cfg(feature = "milkdrop")]
 pub mod pane;
+/// Reading the next preset's file while the one playing is on screen.
+#[cfg(feature = "milkdrop")]
+mod prefetch;
 /// The shared-memory audio ring between the app and the MilkDrop child.
 #[cfg(feature = "milkdrop")]
 pub mod shm;
