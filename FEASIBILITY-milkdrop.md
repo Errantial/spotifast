@@ -100,7 +100,7 @@ the prerequisite for every number below on real hardware.
    render projectM at the inner size, then **two full-frame blits**: inner →
    copy FBO, copy FBO → window rect scaled (`engine.rs:219-246`).
 3. Up to four overlay draws (the keys card, the song card, three corner
-   statuses) — one textured quad each once their bitmap exists
+   statuses), one textured quad each once their bitmap exists
    (`overlay.rs:517+`; corners rewrite at most every 400 ms,
    `child.rs:805-866`).
 4. `swap_buffers` with swap interval 0 (`child.rs:385-387`, `1062`).
@@ -172,7 +172,7 @@ What transfers and what does not:
 - **Transfers**: the spread between presets (~8x) and the crossfade
   multiplier (~2.5x) are shape facts that a GPU will not change much.
 - **Does not transfer**: anything absolute. llvmpipe is CPU rasterization
-  and these frames are 50-200x a mid-range GPU. Do not read "480 ms at
+  and these frames are probably 50-200x a mid-range GPU. Do not read "480 ms at
   1080p" as a GPU cost.
 - The shared-memory bookkeeping is cheap in CPU terms (1.2 ms for a 1080p
   frame at 120 Hz is 14% of an 8.33 ms budget), but it excludes the
@@ -263,10 +263,11 @@ shortcut or command". This feature needs no new setting:
   120 or the screen's rate.
 
 Upstream has already made a pacing decision in this area: PR #732, "Pace the
-visualisers and MilkDrop by what can be seen" (merged 2026-10-12), is where
-the 30 fps energy-saver cap and the visibility budgets live (`power.rs`). A
-120 mode must coexist with that policy rather than bypass it, which is one
-more reason not to add a separate switch.
+visualisers and MilkDrop by what can be seen" (merged 2026-10-12), is the
+change that introduced the visibility budgets and the 30 fps energy-saver cap
+that `power.rs` and `child.rs` implement today. A 120 mode must coexist with
+that policy rather than bypass it, which is one more reason not to add a
+separate switch.
 
 So: **no opt-in switch**. The honest position is that 120 is the screen-rate
 option, and it becomes stable or it does not; a "120 fps" toggle that stutters
@@ -651,7 +652,7 @@ Ordered by what unblocks the most. "WPn" are the work packages in
    defect at any rate and the hard blocker for 120: a synchronous load blocks
    the render thread for its whole parse and shader compile, so at 120 fps a
    load of `L` ms drops `L / 8.33` frames.
-3. **Q2-A: macOS grip resize + a cap on the inner render size** (1-1.5 d,
+3. **Q2: macOS grip resize + a cap on the inner render size** (1-1.5 d,
    independent of the transition work). Fixes behaviour the guide already
    promises on macOS, and bounds the render size on high-DPI and 4K displays,
    which is also 120 fps budget. No new setting.
@@ -669,7 +670,7 @@ Ordered by what unblocks the most. "WPn" are the work packages in
    (2-3 d, interface review needed). Independent of the transition work and
    safe to do in parallel.
 8. **Optional, only with approval**: Q3 thumbnails / preset browser (5-8 d)
-   and Q2-B fixed sizes or aspect snapping (1-2 d). Both are visible features
+   and Q2's fixed sizes or aspect snapping (1-2 d). Both are visible features
    that need a maintainer decision and visual evidence; neither is needed for
    the transition goals.
 
