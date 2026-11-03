@@ -19,6 +19,7 @@ use super::Presets;
 use super::child::{Args, prepare_frame};
 use super::engine::Engine;
 use super::frames::Frames;
+use super::prefetch::Prefetch;
 use super::shm::Ring;
 use super::trace::Trace;
 
@@ -43,6 +44,7 @@ struct Pump {
     presets: Presets,
     /// Load and frame times per switch, when the environment asks for them.
     trace: Trace,
+    prefetch: Prefetch,
     closing: Arc<AtomicBool>,
     beats: u64,
     watched: Instant,
@@ -61,6 +63,7 @@ impl Pump {
             folder: args.presets.clone(),
             presets: Presets::new(),
             trace: Trace::default(),
+            prefetch: Prefetch::start(),
             closing,
             beats: 0,
             watched: Instant::now(),
@@ -115,6 +118,7 @@ impl Pump {
             self.seconds,
             &self.ring,
             &mut self.cursor,
+            &mut self.prefetch,
         );
         if let Some(loaded) = loaded {
             self.trace.note(loaded);

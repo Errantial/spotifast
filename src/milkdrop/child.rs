@@ -28,6 +28,7 @@ use winit::window::{Fullscreen, ResizeDirection, Window, WindowId};
 
 use super::engine::Engine;
 use super::overlay::{Backing, Overlay, Place, Row, Span};
+use super::prefetch::Prefetch;
 use super::shm::Ring;
 use super::trace::{self, Trace};
 use super::{DEFAULT_FPS, DEFAULT_SECONDS, LAG, MIN_SIZE, Presets, Request};
@@ -198,6 +199,8 @@ struct Child {
     ring: Ring,
     cursor: u64,
     presets: Presets,
+    /// The next preset's file, read while this one plays.
+    prefetch: Prefetch,
     live: Option<Live>,
     song: Option<Vec<String>>,
     /// When the last frames were drawn, for the count D shows.
@@ -243,6 +246,7 @@ impl Child {
             ring,
             cursor: 0,
             presets: Presets::new(),
+            prefetch: Prefetch::start(),
             live: None,
             song: None,
             drawn: Vec::new(),
@@ -367,6 +371,7 @@ impl Child {
             self.seconds,
             &self.ring,
             &mut self.cursor,
+            &mut self.prefetch,
         );
         if let Some(loaded) = loaded {
             self.trace.note(loaded);
@@ -975,6 +980,7 @@ pub(super) fn prepare_frame(
     seconds: u32,
     ring: &Ring,
     cursor: &mut u64,
+    prefetch: &mut Prefetch,
 ) -> Option<trace::Loaded> {
     presets.refresh(folder, None);
     if presets.current().is_none() && presets.count() > 0 {
@@ -987,7 +993,17 @@ pub(super) fn prepare_frame(
             // Timed only when the environment asks for it, so an ordinary
             // load pays two clock reads and nothing else.
             let started = trace::enabled().then(Instant::now);
-            engine.load(&path, smooth);
+            // The file is read ahead, so a switch only parses it and
+            // compiles its shaders. A miss reads the file here, as it
+            // always did.
+            match prefetch.take(&path) {
+                Some(data) => {
+                    if !engine.load_data(&path, data, smooth) {
+                        engine.load(&path, smooth);
+                    }
+                }
+                None => engine.load(&path, smooth),
+            }
             started.map(|started| trace::Loaded {
                 path,
                 smooth,
@@ -996,6 +1012,9 @@ pub(super) fn prepare_frame(
         }
         None => None,
     };
+    // Read the preset the next change will play while this one is on
+    // screen.
+    prefetch.want(presets.lookahead());
     let frames = ring.since(cursor, LAG);
     engine.feed_frames(&frames);
     loaded
