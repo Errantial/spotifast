@@ -120,16 +120,29 @@ impl Pump {
             &mut self.cursor,
             &mut self.prefetch,
         );
-        if let Some(loaded) = loaded {
-            self.trace.note(loaded);
-        }
+        // Only a switch pays for these two clock reads, and the first draw
+        // is where the driver compiles the new preset's shaders.
+        let draw_started = loaded.is_some().then(Instant::now);
         // Nothing to draw for until the app has measured its pane, and
         // nothing worth showing before a preset plays.
-        if let Some(size) = self.frames.wanted()
+        let drew = if let Some(size) = self.frames.wanted()
             && self.presets.current().is_some()
         {
             self.frames
                 .publish(size, |pixels| engine.render_into(size[0], size[1], pixels));
+            true
+        } else {
+            false
+        };
+        if let Some(mut loaded) = loaded {
+            // Nothing drawn on the load frame keeps the load alone; the
+            // pane is only ever in that state before its first picture.
+            if drew && let Some(started) = draw_started {
+                loaded.first_draw = started.elapsed();
+            }
+            self.presets
+                .record_switch(&loaded.path, loaded.switch_cost());
+            self.trace.note(loaded);
         }
         let interval = Duration::from_secs_f32(1.0 / self.fps.max(1) as f32);
         let now = Instant::now();

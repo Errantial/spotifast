@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+/// Presets whose switch costs too much to be chosen automatically.
+mod budget;
 /// The MilkDrop child process: its own window, context, and event loop.
 #[cfg(feature = "milkdrop")]
 pub mod child;
@@ -103,6 +105,9 @@ pub const CROSSFADE_SECONDS: f64 = 2.7;
 /// How far behind the newest sample the picture runs: the same lag as the
 /// analyser, so the picture and the speaker agree.
 pub use crate::vis::LAG;
+/// A switch (load and first draw) over this keeps a preset out of automatic
+/// play; see `src/milkdrop/budget.rs`.
+pub use budget::SWITCH_BUDGET;
 /// How long a listing of the folder is trusted.
 const LISTED_FRESH: Duration = Duration::from_secs(30);
 /// How deep into the folder presets are looked for: packs come in a folder
@@ -157,6 +162,9 @@ pub struct Presets {
     /// the child can read its file while this one plays. It joins `history`
     /// only when it plays. Kept in step with `random`, `files` and `at`.
     planned: Option<PathBuf>,
+    /// Presets whose switch was measured too slow to choose by themselves.
+    /// Keys and clicks still reach them.
+    slow: budget::SlowPresets,
     pending: Option<Request>,
     /// When the playing preset was asked for, which its time counts from.
     started: Instant,
@@ -180,6 +188,7 @@ impl Presets {
             locked: false,
             random: true,
             planned: None,
+            slow: budget::SlowPresets::default(),
             pending: None,
             started: Instant::now(),
             download: None,
@@ -233,30 +242,21 @@ impl Presets {
         self.history.get(self.at).map(PathBuf::as_path)
     }
 
-    /// Moves forward through history or selects the next preset.
+    /// Moves forward through history or selects the next preset. A key or a
+    /// click reaches any preset, including one whose switch is slow.
     pub fn next(&mut self, hard: bool) {
-        if self.at + 1 < self.history.len() {
-            self.at += 1;
-        } else {
-            // The pick made ahead, so the file could be read early, is the
-            // one that plays; a pick not made yet is made now.
-            let Some(pick) = self.planned.take().or_else(|| self.pick()) else {
-                return;
-            };
-            // Keep the most recent 100 presets.
-            if self.history.len() >= 100 {
-                self.history.remove(0);
-            }
-            self.history.push(pick);
-            self.at = self.history.len() - 1;
-        }
-        self.request(!hard);
+        self.step(hard, false);
     }
 
     /// The preset the next change will play, chosen now if it is not known:
     /// the next entry in history when Previous has gone back, otherwise a
     /// new pick, which `next` then plays. Reading it early lets the child
     /// have its file in memory before the switch.
+    ///
+    /// This is the pick a key would play, so automatic play may pass it
+    /// over when its switch was measured too slow; the child then reads
+    /// that preset when it gets there. A read thrown away is cheaper than
+    /// a switch nobody can watch.
     pub fn lookahead(&mut self) -> Option<&Path> {
         if self.at + 1 < self.history.len() {
             return self.history.get(self.at + 1).map(PathBuf::as_path);
@@ -280,8 +280,62 @@ impl Presets {
         let fade = Duration::from_secs_f64(CROSSFADE_SECONDS);
         let turn = Duration::from_secs(seconds.into()).max(fade);
         if !self.locked && now.saturating_duration_since(self.started) >= turn {
-            self.next(false);
+            // Automatic play chooses for the picture, not for a key
+            // press: a preset too slow to switch into is passed over.
+            self.step(false, true);
         }
+    }
+
+    /// Notes what changing to a preset cost the frame that loaded it, so a
+    /// preset that makes the picture jump is left out of automatic play.
+    pub(crate) fn record_switch(&mut self, path: &Path, cost: Duration) {
+        let known = !self.slow.allows(path);
+        if self.slow.record(path, cost) && !known {
+            log::info!(
+                "MilkDrop: switching to {} costs {:.0} ms, so it is left out of automatic play ({} presets now)",
+                path.display(),
+                cost.as_secs_f64() * 1_000.0,
+                self.slow.len()
+            );
+        }
+    }
+
+    /// One turn: `automatic` when the app chose the preset by itself,
+    /// which is when a slow one is passed over.
+    fn step(&mut self, hard: bool, automatic: bool) {
+        // A history entry is next when Previous has gone back. Automatic
+        // play skips one whose switch was too slow and picks afresh.
+        if self.at + 1 < self.history.len() {
+            let path = &self.history[self.at + 1];
+            if !automatic || self.slow.allows(path) {
+                self.at += 1;
+                self.request(!hard);
+                return;
+            }
+        }
+        // The pick made ahead, so the file could be read early, is the
+        // one that plays; a pick not made yet is made now.
+        let planned = self
+            .planned
+            .take()
+            .filter(|path| !automatic || self.slow.allows(path));
+        let pick = planned.or_else(|| {
+            if automatic {
+                self.pick_automatic()
+            } else {
+                self.pick()
+            }
+        });
+        let Some(pick) = pick else {
+            return;
+        };
+        // Keep the most recent 100 presets.
+        if self.history.len() >= 100 {
+            self.history.remove(0);
+        }
+        self.history.push(pick);
+        self.at = self.history.len() - 1;
+        self.request(!hard);
     }
 
     /// Back to the preset before this one.
@@ -320,6 +374,49 @@ impl Presets {
             index = (index + 1) % self.files.len();
         }
         Some(self.files[index].clone())
+    }
+
+    /// The pick automatic play makes: the same choice as `pick`, but never
+    /// a preset whose switch was measured too slow, and never the one
+    /// playing while there is another. When every preset is slow it picks
+    /// as usual rather than stop the picture.
+    fn pick_automatic(&self) -> Option<PathBuf> {
+        if self.files.is_empty() {
+            return None;
+        }
+        let at = self
+            .current()
+            .and_then(|path| self.files.iter().position(|file| file == path));
+        let allowed = |index: usize, file: &PathBuf| Some(index) != at && self.slow.allows(file);
+        if !self.random {
+            let files = self.files.len();
+            for step in 1..=files {
+                let index = match at {
+                    Some(at) => (at + step) % files,
+                    None => (step - 1) % files,
+                };
+                if allowed(index, &self.files[index]) {
+                    return Some(self.files[index].clone());
+                }
+            }
+            return self.pick();
+        }
+        let count = self
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(index, file)| allowed(*index, file))
+            .count();
+        if count == 0 {
+            return self.pick();
+        }
+        let chosen = rand::random_range(0..count);
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(index, file)| allowed(*index, file))
+            .nth(chosen)
+            .map(|(_, file)| file.clone())
     }
 
     fn request(&mut self, smooth: bool) {
@@ -962,6 +1059,126 @@ mod tests {
         let ahead = presets.lookahead().map(Path::to_path_buf);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(ahead, Some(c), "the preset now after a, not the one gone");
+    }
+
+    /// A preset whose switch is too slow is passed over when the app
+    /// changes preset by itself, and the following one plays.
+    #[test]
+    fn automatic_play_passes_over_a_slow_preset() {
+        let mut presets = playing(&["a.milk", "b.milk", "c.milk"]);
+        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        let start = presets.started;
+        presets.advance(start + Duration::from_secs(10), 10);
+        assert_eq!(
+            asked_for(&mut presets),
+            Some((PathBuf::from("c.milk"), true))
+        );
+        assert_eq!(presets.current(), Some(Path::new("c.milk")));
+    }
+
+    /// A key press still reaches it: only the app's own choices avoid it.
+    #[test]
+    fn a_key_still_reaches_a_slow_preset() {
+        let mut presets = playing(&["a.milk", "b.milk", "c.milk"]);
+        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        presets.next(false);
+        assert_eq!(
+            asked_for(&mut presets),
+            Some((PathBuf::from("b.milk"), true))
+        );
+        assert_eq!(presets.current(), Some(Path::new("b.milk")));
+    }
+
+    /// So does Previous, walking back through what has played.
+    #[test]
+    fn previous_still_reaches_a_slow_preset() {
+        let mut presets = playing(&["a.milk", "b.milk", "c.milk"]);
+        presets.next(false);
+        presets.take_request();
+        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        presets.next(false);
+        presets.take_request();
+        presets.previous();
+        assert_eq!(
+            asked_for(&mut presets),
+            Some((PathBuf::from("b.milk"), true))
+        );
+    }
+
+    /// Automatic play does not walk forward into a slow entry of history
+    /// either; it chooses again past it.
+    #[test]
+    fn automatic_play_leaves_a_slow_history_entry_behind() {
+        let mut presets = playing(&["a.milk", "b.milk", "c.milk", "d.milk"]);
+        presets.next(false);
+        presets.take_request();
+        presets.next(false);
+        presets.take_request();
+        assert_eq!(presets.current(), Some(Path::new("c.milk")));
+        presets.previous();
+        presets.take_request();
+        assert_eq!(presets.current(), Some(Path::new("b.milk")));
+        presets.record_switch(Path::new("c.milk"), Duration::from_millis(120));
+        presets.advance(presets.started + Duration::from_secs(10), 10);
+        assert_eq!(
+            asked_for(&mut presets),
+            Some((PathBuf::from("d.milk"), true)),
+            "c is next in history but too slow to switch into"
+        );
+    }
+
+    /// In random order automatic play only samples the presets that are
+    /// not slow.
+    #[test]
+    fn automatic_play_never_picks_a_slow_preset_at_random() {
+        let mut presets = Presets::new();
+        presets.files = ["a.milk", "b.milk", "c.milk", "d.milk"]
+            .map(PathBuf::from)
+            .to_vec();
+        presets.next(false);
+        presets.take_request();
+        let current = presets.current().unwrap().to_path_buf();
+        let fast = presets
+            .files
+            .iter()
+            .find(|file| **file != current)
+            .unwrap()
+            .clone();
+        let files = presets.files.clone();
+        for file in &files {
+            if file != &fast {
+                presets.record_switch(file, Duration::from_millis(120));
+            }
+        }
+        presets.advance(presets.started + Duration::from_secs(10), 10);
+        assert_eq!(presets.current(), Some(fast.as_path()));
+        assert_eq!(asked_for(&mut presets), Some((fast, true)));
+    }
+
+    /// When every preset is slow the picture keeps changing: the list is a
+    /// preference, not a reason to stop.
+    #[test]
+    fn automatic_play_goes_on_when_every_preset_is_slow() {
+        let mut presets = playing(&["a.milk", "b.milk"]);
+        presets.record_switch(Path::new("a.milk"), Duration::from_millis(120));
+        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        presets.advance(presets.started + Duration::from_secs(10), 10);
+        assert_eq!(
+            asked_for(&mut presets),
+            Some((PathBuf::from("b.milk"), true))
+        );
+    }
+
+    /// The pick a key plays ahead is the next file even when it is slow,
+    /// so the file read early is still useful.
+    #[test]
+    fn a_key_plays_the_slow_pick_ahead() {
+        let mut presets = playing(&["a.milk", "b.milk", "c.milk"]);
+        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        let ahead = presets.lookahead().unwrap().to_path_buf();
+        assert_eq!(ahead, PathBuf::from("b.milk"));
+        presets.next(false);
+        assert_eq!(asked_for(&mut presets), Some((ahead, true)));
     }
 
     #[test]

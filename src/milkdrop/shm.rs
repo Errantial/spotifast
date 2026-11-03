@@ -150,6 +150,9 @@ mod tests {
         writer.push(&extra);
         let mut stale = 0;
         assert_eq!(reader.since(&mut stale, 0).len(), FRAMES);
+        // A long frame gets at most the ring's worth of sound, and each
+        // frame of it is fed once: the cursor has moved past all of it.
+        assert_eq!(reader.since(&mut stale, 0).len(), 0);
         std::fs::remove_file(&path).unwrap();
     }
 }

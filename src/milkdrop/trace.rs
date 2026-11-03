@@ -2,9 +2,11 @@
 //!
 //! Turning a `.milk` file into running shaders happens between two frames,
 //! on the thread that draws, so its cost is paid by one frame and shows as
-//! a hitch. This reports each switch and a summary on stderr when the child
-//! is started with `SPOTIFAST_MILKDROP_TRACE` set; with it unset the only
-//! cost is the cached check that reads it once.
+//! a hitch. Part of it is the load itself (read, parse, translate) and part
+//! is the first draw of the new preset, where the driver compiles and links
+//! its shaders. This reports both, and the frames after them, on stderr when
+//! the child is started with `SPOTIFAST_MILKDROP_TRACE` set; with it unset
+//! the only cost is the cached check that reads it once.
 //!
 //! The measurements are wall-clock times of the frame boundaries, which is
 //! what a person sees. A GPU's own timings would say where inside a frame
@@ -24,6 +26,9 @@ const WINDOW: Duration = Duration::from_secs(1);
 /// How many frames after a switch the first-frames figure counts.
 const FIRST: usize = 30;
 
+/// How many of the costliest switches the summary ranks.
+const SLOWEST: usize = 20;
+
 /// Whether the child was asked to report its frames. Read once, so a frame
 /// asks a cached `bool` rather than the environment.
 pub fn enabled() -> bool {
@@ -36,7 +41,19 @@ pub fn enabled() -> bool {
 pub struct Loaded {
     pub path: PathBuf,
     pub smooth: bool,
+    /// Reading, parsing and translating the preset.
     pub took: Duration,
+    /// The first draw of the new preset, where its shaders compile and
+    /// link. Filled in after that draw, so it is zero until then.
+    pub first_draw: Duration,
+}
+
+impl Loaded {
+    /// What the switch cost the frame that paid for it: the load and the
+    /// first draw, which is what a person sees as the hitch.
+    pub fn switch_cost(&self) -> Duration {
+        self.took + self.first_draw
+    }
 }
 
 /// A switch whose frames are still being watched.
@@ -44,7 +61,9 @@ struct Watching {
     name: String,
     smooth: bool,
     load: Duration,
-    /// When the load returned, which the frames are counted from.
+    first_draw: Duration,
+    /// When the switch was noted, after its first draw, which the frames
+    /// are counted from.
     at: Instant,
     /// Frame durations since the switch, in milliseconds.
     frames: Vec<f64>,
@@ -52,7 +71,11 @@ struct Watching {
 
 /// One finished switch, kept for the summary.
 struct Switch {
+    name: String,
+    smooth: bool,
     load_ms: f64,
+    first_draw_ms: f64,
+    switch_ms: f64,
     worst_ms: f64,
     first: Vec<f64>,
 }
@@ -101,6 +124,7 @@ impl Trace {
                 .unwrap_or_else(|| loaded.path.to_string_lossy().into_owned()),
             smooth: loaded.smooth,
             load: loaded.took,
+            first_draw: loaded.first_draw,
             at,
             frames: Vec::new(),
         });
@@ -134,11 +158,14 @@ impl Trace {
         };
         let worst_ms = watching.frames.iter().copied().fold(0.0, f64::max);
         let first: Vec<f64> = watching.frames.iter().copied().take(FIRST).collect();
+        let switch_ms = ms(watching.load + watching.first_draw);
         eprintln!(
-            "milkdrop trace: switch preset={:?} smooth={} load_ms={:.1} first_{}_p50_ms={:.1} first_{}_max_ms={:.1} worst_{}s_ms={:.1} frames={}",
+            "milkdrop trace: switch preset={:?} smooth={} load_ms={:.1} first_draw_ms={:.1} switch_ms={:.1} first_{}_p50_ms={:.1} first_{}_max_ms={:.1} worst_{}s_ms={:.1} frames={}",
             watching.name,
             u8::from(watching.smooth),
             ms(watching.load),
+            ms(watching.first_draw),
+            switch_ms,
             FIRST,
             percentile(&sorted(&first), 0.5),
             FIRST,
@@ -148,7 +175,11 @@ impl Trace {
             watching.frames.len(),
         );
         self.switches.push(Switch {
+            name: watching.name,
+            smooth: watching.smooth,
             load_ms: ms(watching.load),
+            first_draw_ms: ms(watching.first_draw),
+            switch_ms,
             worst_ms,
             first,
         });
@@ -160,32 +191,61 @@ impl Trace {
             return;
         }
         let loads = sorted(&self.switches.iter().map(|s| s.load_ms).collect::<Vec<_>>());
+        let draws = sorted(
+            &self
+                .switches
+                .iter()
+                .map(|s| s.first_draw_ms)
+                .collect::<Vec<_>>(),
+        );
+        let costs = sorted(
+            &self
+                .switches
+                .iter()
+                .map(|s| s.switch_ms)
+                .collect::<Vec<_>>(),
+        );
         let worst = sorted(&self.switches.iter().map(|s| s.worst_ms).collect::<Vec<_>>());
         let first_max = self
             .switches
             .iter()
             .map(|s| s.first.iter().copied().fold(0.0, f64::max))
             .fold(0.0, f64::max);
-        let slowest = self
-            .switches
-            .iter()
-            .max_by(|a, b| a.load_ms.total_cmp(&b.load_ms))
-            .map(|s| s.load_ms)
-            .unwrap_or(0.0);
         eprintln!(
-            "milkdrop trace: summary switches={} load_ms[p50={:.1} p99={:.1} max={:.1}] worst_{}s_ms[p50={:.1} p99={:.1} max={:.1}] first_{}_max_ms={:.1} slowest_load_ms={:.1}",
+            "milkdrop trace: summary switches={} load_ms[p50={:.1} p99={:.1} max={:.1}] first_draw_ms[p50={:.1} p99={:.1} max={:.1}] switch_ms[p50={:.1} p99={:.1} max={:.1}] worst_{}s_ms[p50={:.1} p99={:.1} max={:.1}] first_{}_max_ms={:.1}",
             self.switches.len(),
             percentile(&loads, 0.5),
             percentile(&loads, 0.99),
             loads.last().copied().unwrap_or(0.0),
+            percentile(&draws, 0.5),
+            percentile(&draws, 0.99),
+            draws.last().copied().unwrap_or(0.0),
+            percentile(&costs, 0.5),
+            percentile(&costs, 0.99),
+            costs.last().copied().unwrap_or(0.0),
             WINDOW.as_secs(),
             percentile(&worst, 0.5),
             percentile(&worst, 0.99),
             worst.last().copied().unwrap_or(0.0),
             FIRST,
             first_max,
-            slowest,
         );
+        // The presets worth keeping out of automatic play, most costly
+        // first, with the two halves of the cost kept apart.
+        let mut slowest = self.switches.iter().collect::<Vec<_>>();
+        slowest.sort_by(|a, b| b.switch_ms.total_cmp(&a.switch_ms));
+        eprintln!("milkdrop trace: slowest switches:");
+        for (rank, switch) in slowest.iter().take(SLOWEST).enumerate() {
+            eprintln!(
+                "milkdrop trace:  {:>2}. switch={:.1}ms load={:.1}ms first_draw={:.1}ms smooth={} {}",
+                rank + 1,
+                switch.switch_ms,
+                switch.load_ms,
+                switch.first_draw_ms,
+                u8::from(switch.smooth),
+                switch.name,
+            );
+        }
     }
 }
 
@@ -237,6 +297,7 @@ mod tests {
             path: PathBuf::from(name),
             smooth: true,
             took,
+            first_draw: Duration::ZERO,
         }
     }
 
@@ -260,6 +321,31 @@ mod tests {
             (switch.worst_ms - 120.0).abs() < 0.01,
             "the load's frame is the worst: {}",
             switch.worst_ms
+        );
+    }
+
+    /// The first draw is timed apart from the load, and the switch cost is
+    /// the two together: a preset can be cheap to read and heavy to draw.
+    #[test]
+    fn a_switch_keeps_its_first_draw_apart_from_its_load() {
+        let mut trace = traced();
+        let start = Instant::now();
+        let mut loaded = loaded("heavy.milk", Duration::from_millis(3));
+        loaded.first_draw = Duration::from_millis(60);
+        assert_eq!(loaded.switch_cost(), Duration::from_millis(63));
+        trace.note_at(loaded, start);
+        trace.finish();
+        let switch = &trace.switches[0];
+        assert!((switch.load_ms - 3.0).abs() < 0.01, "{}", switch.load_ms);
+        assert!(
+            (switch.first_draw_ms - 60.0).abs() < 0.01,
+            "{}",
+            switch.first_draw_ms
+        );
+        assert!(
+            (switch.switch_ms - 63.0).abs() < 0.01,
+            "{}",
+            switch.switch_ms
         );
     }
 

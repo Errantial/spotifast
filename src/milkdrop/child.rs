@@ -373,9 +373,9 @@ impl Child {
             &mut self.cursor,
             &mut self.prefetch,
         );
-        if let Some(loaded) = loaded {
-            self.trace.note(loaded);
-        }
+        // Only a switch pays for these two clock reads, and the first draw
+        // is where the driver compiles the new preset's shaders.
+        let draw_started = loaded.is_some().then(Instant::now);
         let size = live.window.inner_size();
         live.engine.render(
             0,
@@ -384,6 +384,14 @@ impl Child {
             size.height.max(1),
             self.scale.max(1),
         );
+        if let Some(mut loaded) = loaded {
+            loaded.first_draw = draw_started
+                .map(|started| started.elapsed())
+                .unwrap_or_default();
+            self.presets
+                .record_switch(&loaded.path, loaded.switch_cost());
+            self.trace.note(loaded);
+        }
         if let Some(overlay) = &mut live.overlay {
             overlay.draw(&live.gl, (size.width, size.height));
         }
@@ -1008,6 +1016,8 @@ pub(super) fn prepare_frame(
                 path,
                 smooth,
                 took: started.elapsed(),
+                // The first draw comes after this, in the caller.
+                first_draw: Duration::ZERO,
             })
         }
         None => None,

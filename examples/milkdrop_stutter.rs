@@ -33,7 +33,8 @@ use glutin::surface::{GlSurface, Surface, SurfaceAttributesBuilder, SwapInterval
 use glutin_winit::DisplayBuilder;
 use raw_window_handle::HasWindowHandle;
 use spotifast::milkdrop::engine::Engine;
-use spotifast::milkdrop::{CROSSFADE_SECONDS, PACKS, fetch_pack, list_presets};
+use spotifast::milkdrop::shm::FRAMES;
+use spotifast::milkdrop::{CROSSFADE_SECONDS, PACKS, SWITCH_BUDGET, fetch_pack, list_presets};
 use spotifast::settings::ProxyConfig;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -46,6 +47,9 @@ const SAMPLE_RATE: u32 = 48_000;
 /// A load slower than this blocks the render thread, which the plan's
 /// success criteria call out.
 const BUDGET_MS: f64 = 8.0;
+/// A switch (load and first draw) over this is kept out of automatic play
+/// by the engine's own policy; the harness counts the same presets.
+const SWITCH_BUDGET_MS: f64 = SWITCH_BUDGET.as_millis() as f64;
 
 fn main() {
     let options = match Options::parse(std::env::args().skip(1)) {
@@ -371,6 +375,8 @@ impl ApplicationHandler for Harness {
 struct Switch {
     name: String,
     load_ms: f64,
+    /// The first draw of the new preset, where its shaders compile.
+    first_draw_ms: f64,
     /// When the interval this preset holds ends, and its fade does.
     end: Instant,
     fade_start: Instant,
@@ -393,6 +399,12 @@ struct Bench {
     audio: Audio,
     audio_at: Instant,
     loads: Vec<(String, f64)>,
+    /// The first draw of each preset, apart from its load.
+    draws: Vec<(String, f64)>,
+    /// Load and first draw together: what a switch cost its frame.
+    costs: Vec<(String, f64)>,
+    /// Stereo frames of audio handed to projectM each frame.
+    samples: Vec<usize>,
     crossfade: Vec<f64>,
     steady: Vec<f64>,
     worsts: Vec<f64>,
@@ -418,6 +430,9 @@ impl Bench {
             audio: Audio::new(),
             audio_at: now,
             loads: Vec::new(),
+            draws: Vec::new(),
+            costs: Vec::new(),
+            samples: Vec::new(),
             crossfade: Vec::new(),
             steady: Vec::new(),
             worsts: Vec::new(),
@@ -434,20 +449,29 @@ impl Bench {
 
     fn frame(&mut self, live: &mut Live) {
         let at = Instant::now();
-        if self.current.is_none() {
+        let switched = self.current.is_none();
+        if switched {
             self.start_switch(live);
         }
         // The sound the app's ring would have caught up with, a burst after
-        // a long frame included.
+        // a long frame included. The cap is the ring's own: `Ring::since`
+        // cannot return more than it holds.
         let elapsed = at.saturating_duration_since(self.audio_at);
-        let samples =
-            ((elapsed.as_secs_f64() * f64::from(SAMPLE_RATE)) as usize).min(SAMPLE_RATE as usize);
+        let samples = ((elapsed.as_secs_f64() * f64::from(SAMPLE_RATE)) as usize).min(FRAMES);
         self.audio_at = at;
+        self.samples.push(samples);
         let pcm = self.audio.next(samples);
         live.engine.feed_frames(&pcm);
+        // The first draw of a newly loaded preset is timed apart from its
+        // load: this is where the driver compiles and links its shaders.
+        let draw_started = Instant::now();
         let size = live.window.inner_size();
         live.engine
             .render(0, 0, size.width.max(1), size.height.max(1), 1);
+        let draw = draw_started.elapsed().as_secs_f64() * 1_000.0;
+        if switched && let Some(current) = &mut self.current {
+            current.first_draw_ms = draw;
+        }
         let drawn = Instant::now();
         let took = drawn.saturating_duration_since(self.last_frame);
         self.last_frame = drawn;
@@ -491,6 +515,7 @@ impl Bench {
         self.current = Some(Switch {
             name,
             load_ms: load.as_secs_f64() * 1_000.0,
+            first_draw_ms: 0.0,
             end: started + self.interval,
             fade_start: started + load,
             fade_end: started + load + Duration::from_secs_f64(CROSSFADE_SECONDS),
@@ -502,6 +527,15 @@ impl Bench {
         let Some(current) = self.current.take() else {
             return;
         };
+        // The frame that paid for the load began before the fade did. Its
+        // whole time is what a person sees as the hitch.
+        let stall = current
+            .frames
+            .iter()
+            .find(|(began, _, _)| *began < current.fade_start)
+            .map(|(_, _, ms)| *ms)
+            .unwrap_or(0.0);
+        let switch = current.load_ms + current.first_draw_ms;
         // A frame that began before the fade did is the one that paid for
         // the load; it is the stall, not the crossfade's cost.
         let crossfade: Vec<f64> = current
@@ -521,14 +555,6 @@ impl Bench {
             .iter()
             .map(|(_, _, ms)| *ms)
             .fold(0.0, f64::max);
-        // The frame that paid for the load began before the fade did. Its
-        // whole time is what a person sees as the hitch.
-        let stall = current
-            .frames
-            .iter()
-            .find(|(began, _, _)| *began < current.fade_start)
-            .map(|(_, _, ms)| *ms)
-            .unwrap_or(0.0);
         // The plan's criterion is the worst frame in the second after a
         // switch, which starts when the load does.
         let after_one = current.end - self.interval + Duration::from_secs(1);
@@ -539,12 +565,15 @@ impl Bench {
             .map(|(_, _, ms)| *ms)
             .fold(0.0, f64::max);
         println!(
-            "milkdrop_stutter: switch {:>3}/{} {:?} load={:.1}ms stall={:.1}ms worst_{:.0}s={:.1}ms frames={} crossfade[p50={:.1} p99={:.1} n={}] steady[p50={:.1} p99={:.1} n={}]",
+            "milkdrop_stutter: switch {:>3}/{} {:?} load={:.1}ms first_draw={:.1}ms switch={:.1}ms stall={:.1}ms other={:.1}ms worst_{:.0}s={:.1}ms frames={} crossfade[p50={:.1} p99={:.1} n={}] steady[p50={:.1} p99={:.1} n={}]",
             self.next,
             self.presets.len(),
             current.name,
             current.load_ms,
+            current.first_draw_ms,
+            switch,
             stall,
+            (stall - switch).max(0.0),
             self.interval.as_secs_f64(),
             worst,
             current.frames.len(),
@@ -555,6 +584,9 @@ impl Bench {
             percentile(&steady, 0.99),
             steady.len(),
         );
+        self.draws
+            .push((current.name.clone(), current.first_draw_ms));
+        self.costs.push((current.name.clone(), switch));
         self.stalls.push(stall);
         self.worsts.push(worst);
         self.first_second.push(worst_first_second);
@@ -571,7 +603,10 @@ impl Bench {
         self.finish_switch();
         let elapsed = self.last_frame.saturating_duration_since(self.started);
         let loads: Vec<f64> = self.loads.iter().map(|(_, ms)| *ms).collect();
+        let draws: Vec<f64> = self.draws.iter().map(|(_, ms)| *ms).collect();
+        let costs: Vec<f64> = self.costs.iter().map(|(_, ms)| *ms).collect();
         let over_budget = loads.iter().filter(|ms| **ms > BUDGET_MS).count();
+        let over_switch = costs.iter().filter(|ms| **ms > SWITCH_BUDGET_MS).count();
         println!();
         println!(
             "milkdrop_stutter: summary: {} presets, {} frames in {:.1}s, {:.1} fps, {} cuts",
@@ -588,6 +623,31 @@ impl Bench {
             percentile(&loads, 1.0),
             over_budget,
             BUDGET_MS,
+        );
+        println!(
+            "  first draw ms:         p50={:.1} p99={:.1} max={:.1}",
+            percentile(&draws, 0.5),
+            percentile(&draws, 0.99),
+            percentile(&draws, 1.0),
+        );
+        println!(
+            "  switch cost ms:        p50={:.1} p99={:.1} max={:.1} ({} over {:.0}ms budget)",
+            percentile(&costs, 0.5),
+            percentile(&costs, 0.99),
+            percentile(&costs, 1.0),
+            over_switch,
+            SWITCH_BUDGET_MS,
+        );
+        let samples: Vec<f64> = self.samples.iter().map(|n| *n as f64).collect();
+        let frame_audio = f64::from(SAMPLE_RATE) / f64::from(self.fps.max(1));
+        let bursts = samples.iter().filter(|n| **n > 2.0 * frame_audio).count();
+        println!(
+            "  pcm per frame:         p50={:.0} p99={:.0} max={:.0} samples ({} over two frames of {:.0})",
+            percentile(&samples, 0.5),
+            percentile(&samples, 0.99),
+            percentile(&samples, 1.0),
+            bursts,
+            frame_audio,
         );
         println!(
             "  frame ms during fade:  p50={:.1} p99={:.1} max={:.1} (n={})",
@@ -633,6 +693,27 @@ impl Bench {
         println!("  slowest loads:");
         for (rank, (name, ms)) in slowest.iter().take(20).enumerate() {
             println!("   {:>2}. {:>8.1} ms  {}", rank + 1, ms, shorten(name, 72));
+        }
+        // The list the engine's skip policy would build, most costly first,
+        // with the two halves of each switch kept apart.
+        let mut slowest = self.costs.clone();
+        slowest.sort_by(|a, b| b.1.total_cmp(&a.1));
+        println!("  slowest switches:");
+        for (rank, (name, ms)) in slowest.iter().take(20).enumerate() {
+            let load = self
+                .loads
+                .iter()
+                .find(|(load_name, _)| load_name == name)
+                .map(|(_, ms)| *ms)
+                .unwrap_or(0.0);
+            println!(
+                "   {:>2}. switch={:>8.1} ms  load={:>6.1}  first_draw={:>7.1}  {}",
+                rank + 1,
+                ms,
+                load,
+                (ms - load).max(0.0),
+                shorten(name, 64)
+            );
         }
     }
 }
