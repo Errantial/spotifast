@@ -60,22 +60,38 @@ impl Governor {
         self.scale
     }
 
+    /// Whether the picture is at the detail the user asked for, rather than
+    /// at the smaller one a fade took. A switch cost measured below it is
+    /// cheaper than the switch a person would see, so it is not the number
+    /// the slow-preset budget may act on.
+    pub(super) fn full_detail(&self) -> bool {
+        self.scale == 1
+    }
+
     /// One frame's cost, and whether a preset is fading in right now.
     ///
     /// A frame over the budget in a fade means the two presets did not fit;
     /// [`LATE_FRAMES`] of them in a row means the whole fade will not, so the
     /// picture gives up detail until it ends. Outside a fade the window is
     /// kept up to date but nothing is decided.
+    ///
+    /// A frame that paid for a preset switch is not a fade frame: its cost is
+    /// the switch's, which is one long frame whether or not a fade runs, so
+    /// it neither steps the detail down nor counts toward a step.
     pub(super) fn observe(
         &mut self,
         now: Instant,
         frame: Duration,
         fading: bool,
+        switched: bool,
         budget: Duration,
     ) {
         if budget.is_zero() {
             self.scale = 1;
             self.held = None;
+            return;
+        }
+        if switched {
             return;
         }
         if self.filled == WINDOW {
@@ -123,7 +139,7 @@ mod tests {
         cost: Duration,
         fading: bool,
     ) {
-        governor.observe(base + BUDGET * index, cost, fading, BUDGET);
+        governor.observe(base + BUDGET * index, cost, fading, false, BUDGET);
     }
 
     /// A fade the machine keeps up with is left alone, frame after frame, so
@@ -182,11 +198,11 @@ mod tests {
         let end = base + BUDGET * 20;
         let frames = (HOLD.as_nanos() / BUDGET.as_nanos()) as u32 - 1;
         for step in 0..frames {
-            governor.observe(end + BUDGET * step, BUDGET / 2, false, BUDGET);
+            governor.observe(end + BUDGET * step, BUDGET / 2, false, false, BUDGET);
             assert_eq!(governor.scale(), DOWN, "restored after {step} frames");
         }
         let after = end + HOLD;
-        governor.observe(after, BUDGET / 2, false, BUDGET);
+        governor.observe(after, BUDGET / 2, false, false, BUDGET);
         assert_eq!(governor.scale(), 1, "the hold is over");
     }
 
@@ -228,9 +244,9 @@ mod tests {
         let end = base + BUDGET * 20;
         // The fade is over here, which starts the hold; the next frame past
         // it brings full detail back.
-        governor.observe(end, BUDGET / 2, false, BUDGET);
+        governor.observe(end, BUDGET / 2, false, false, BUDGET);
         assert_eq!(governor.scale(), DOWN, "held at the seam");
-        governor.observe(end + HOLD, BUDGET / 2, false, BUDGET);
+        governor.observe(end + HOLD, BUDGET / 2, false, false, BUDGET);
         assert_eq!(governor.scale(), 1);
 
         // The machine has not changed, so the next heavy fade may take the
@@ -248,7 +264,55 @@ mod tests {
     fn no_budget_decides_nothing() {
         let mut governor = Governor::new();
         let base = Instant::now();
-        governor.observe(base, Duration::from_secs(1), true, Duration::ZERO);
+        governor.observe(base, Duration::from_secs(1), true, false, Duration::ZERO);
         assert_eq!(governor.scale(), 1);
+    }
+
+    /// The long frame that loads a preset and draws it the first time is the
+    /// switch's cost, not the fade's: pressing Next through a fade must not
+    /// shrink the picture because the switch frames are slow.
+    #[test]
+    fn a_switch_frame_does_not_judge_a_fade() {
+        let mut governor = Governor::new();
+        let base = Instant::now();
+        // Every frame of the fade pays for a switch, each far over budget.
+        for index in 0..400 {
+            governor.observe(base + BUDGET * index, BUDGET * 20, true, true, BUDGET);
+            assert_eq!(governor.scale(), 1, "frame {index} judged by its switch");
+        }
+
+        // The fade's own frames, slow ones, still decide as before.
+        for index in 0..WINDOW as u32 {
+            governor.observe(
+                base + BUDGET * (400 + index),
+                BUDGET * 3,
+                true,
+                false,
+                BUDGET,
+            );
+        }
+        assert_eq!(governor.scale(), DOWN, "a heavy fade is still seen");
+    }
+
+    /// While the step down is held, a switch is drawn at a quarter of the
+    /// work, so its cost must not be taken as what the switch costs.
+    #[test]
+    fn a_held_step_down_is_not_full_detail() {
+        let mut governor = Governor::new();
+        let base = Instant::now();
+        assert!(governor.full_detail(), "full detail to begin with");
+        for index in 0..WINDOW as u32 {
+            observe_frame(&mut governor, base, index, BUDGET * 3, true);
+        }
+        assert_eq!(governor.scale(), DOWN);
+        assert!(
+            !governor.full_detail(),
+            "a switch here is drawn small, not as a person sees it"
+        );
+
+        governor.observe(base + BUDGET * 20, BUDGET / 2, false, false, BUDGET);
+        assert!(!governor.full_detail(), "still held after the fade");
+        governor.observe(base + BUDGET * 20 + HOLD, BUDGET / 2, false, false, BUDGET);
+        assert!(governor.full_detail(), "and full detail is back");
     }
 }

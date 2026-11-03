@@ -385,13 +385,13 @@ impl Child {
         // Read before `prepare_frame` moves the presets on: a fade that
         // begins with this frame is measured from the one after it, so the
         // preset load itself is not mistaken for the fade being too heavy.
+        // A frame that does load one is told apart at the end, where the
+        // governor is given the frame.
         let fading = self.presets.fading(started);
         let budget = self.frame_budget();
-        let scale = self
-            .scale
-            .max(1)
-            .saturating_mul(self.quality.scale())
-            .min(MAX_SCALE);
+        // The fade governor's own step down, on top of the user's setting.
+        let detail = self.quality.scale();
+        let scale = self.scale.max(1).saturating_mul(detail).min(MAX_SCALE);
         let Some(live) = &mut self.live else {
             return;
         };
@@ -414,8 +414,14 @@ impl Child {
             loaded.first_draw = draw_started
                 .map(|started| started.elapsed())
                 .unwrap_or_default();
-            self.presets
-                .record_switch(&loaded.path, loaded.switch_cost());
+            // Only a switch drawn at the detail the picture normally has says
+            // what switching to this preset costs: while a fade holds the
+            // governor's step down, the first draw is a quarter of the work,
+            // and the budget would trust a slow preset on the strength of it.
+            if self.quality.full_detail() {
+                self.presets
+                    .record_switch(&loaded.path, loaded.switch_cost());
+            }
             self.trace.note(loaded);
         }
         if let Some(overlay) = &mut live.overlay {
@@ -433,8 +439,13 @@ impl Child {
         if let Err(error) = live.surface.swap_buffers(&live.context) {
             eprintln!("MilkDrop: present failed: {error}");
         }
-        self.quality
-            .observe(Instant::now(), started.elapsed(), fading, budget);
+        self.quality.observe(
+            Instant::now(),
+            started.elapsed(),
+            fading,
+            draw_started.is_some(),
+            budget,
+        );
         self.update_corners();
         self.report_geometry();
     }
