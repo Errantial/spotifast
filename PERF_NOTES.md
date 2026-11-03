@@ -422,6 +422,66 @@ already knows from `screen_hz`), leave Linux as it is because the egui fork
 paces Wayland frames by the compositor's callbacks (AGENTS.md), and compare
 frame-interval histograms from WP1's trace plus the eye.
 
+## WP5: the integrated branch (llvmpipe, 2026-11-03)
+
+WP4 merged into WP2 and WP3, then the same command and the same 200-preset
+sample as the tables above, twice, back to back. The second run is the warm
+one and the comparable one. The host was busier than on the WP3 day (the
+first run's switch tail reached 1.2 s, and its own fade ratio was 2.28x), so
+the first run is given only for the noise it shows.
+
+| metric, warm, 200 presets | WP1 baseline | WP3 after | integrated |
+|---|---:|---:|---:|
+| preset load p50 / p99 / max (ms) | 10.2 / 24.8 / 26.4 | 9.4 / 26.3 / 29.2 | 11.2 / 28.4 / 35.6 |
+| first draw p50 / p99 / max (ms) | not measured | 67.0 / 164.2 / 236.1 | 68.8 / 213.7 / 218.5 |
+| switch p50 / p99 / max (ms) | not measured | 75.4 / 183.8 / 251.1 | 81.5 / 230.8 / 239.0 |
+| stall frame p50 / p99 (ms) | 92.0 / 256.2 | 94.8 / 204.0 | 101.2 / 234.8 |
+| worst frame per switch p50 / p99 / max (ms) | 97.8 / 267.9 / 345.7 | 98.6 / 204.0 / 271.1 | 103.3 / 234.8 / 259.4 |
+| worst frame in the 1 s after, p99 (ms) | 256.2 | 239.4 | 234.8 |
+| frame ms during fade, p50 / p99 (ms) | 71.1 / 136.8 | 76.1 / 142.7 | 76.1 / 134.4 |
+| frame ms steady, p50 / p99 (ms) | 47.5 / 83.0 | 50.7 / 80.1 | 49.6 / 78.4 |
+| fade p99 / steady p99 | 1.65x | 1.78x | 1.71x |
+| achieved frame rate | 14.0 fps | 13.1 fps | 13.0 fps |
+| loads over 8 ms | 107 of 200 | 101 of 200 | 112 of 200 |
+| switches over 50 ms | not counted | 185 of 200 | 190 of 200 |
+
+Every median agrees with the WP3 run within 10%, and the fade window costs
+1.71x a steady frame against 1.78x. That is the expected result, not a gain:
+`examples/milkdrop_stutter.rs` drives `Engine` itself, so the prefetch worker,
+the slow list and the fade governor (all of them in the child) are not on its
+path. The harness can show a regression in the engine and the crossfade
+constant; it cannot show a gain from WP2 to WP4.
+
+### The governor's lever on the same tree
+
+`examples/milkdrop_scale_probe.rs`, same day and host, on the integrated tree,
+12 presets from the same folder, 8 frames per fade:
+
+| window | steady | fade, full | fade, half | half / full |
+|---|---:|---:|---:|---:|
+| 640x480 | 27.4 ms | 56.7 ms | 50.9 ms | 90% |
+| 1920x1080 | 42.3 ms | 90.8 ms | 59.8 ms | 66% |
+
+WP4's earlier run of the same probe read 83% and 55%; this host is slower
+today and llvmpipe's per-pass overhead swamps the fill the scale divides at
+640x480, so the two disagree where the measurement is weakest and agree in
+direction. At 1080p the step removed 31 ms of a 90.8 ms fade frame here. What
+this says for a real GPU is only that the lever quarters the pixels the two
+presets and the transition shader touch; the fill-bound gain itself needs a
+GPU with a display.
+
+### The two work packages that could have fought
+
+The governor and the switch budget both judge a frame, and each can mislead
+the other: a switch drawn while the step down is held measures a quarter of
+its real first draw, which would let a slow preset back into automatic play;
+and the long frame that loads a preset would, inside a fade, count as a fade
+that cannot keep up when the user is pressing Next. The governor now refuses
+to judge a frame that loaded a preset, and the child only records a switch
+cost while the governor is at full detail. Both rules are unit tested
+(`governor.rs`), and the harness numbers above are unchanged by them because
+its frames never load through the child.
+
 ## What is relative only
 
 - Absolute frame times (45 to 70 ms steady) are llvmpipe drawing on the
