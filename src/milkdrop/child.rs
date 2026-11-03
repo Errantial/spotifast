@@ -29,6 +29,7 @@ use winit::window::{Fullscreen, ResizeDirection, Window, WindowId};
 use super::engine::Engine;
 use super::overlay::{Backing, Overlay, Place, Row, Span};
 use super::shm::Ring;
+use super::trace::{self, Trace};
 use super::{DEFAULT_FPS, DEFAULT_SECONDS, LAG, MIN_SIZE, Presets, Request};
 
 /// What the child is told to do, on stdin, as one JSON object per line.
@@ -201,6 +202,8 @@ struct Child {
     song: Option<Vec<String>>,
     /// When the last frames were drawn, for the count D shows.
     drawn: Vec<Instant>,
+    /// Load and frame times per switch, when the environment asks for them.
+    trace: Trace,
     /// Whether the keys are what is on show, so the same key hides them.
     showing_keys: bool,
     /// Song-title display mode.
@@ -243,6 +246,7 @@ impl Child {
             live: None,
             song: None,
             drawn: Vec::new(),
+            trace: Trace::default(),
             showing_keys: false,
             song_shown: SongShown::OnChange,
             preset_on: false,
@@ -356,7 +360,7 @@ impl Child {
         let Some(live) = &mut self.live else {
             return;
         };
-        prepare_frame(
+        let loaded = prepare_frame(
             &mut live.engine,
             &mut self.presets,
             &self.args.presets,
@@ -364,6 +368,9 @@ impl Child {
             &self.ring,
             &mut self.cursor,
         );
+        if let Some(loaded) = loaded {
+            self.trace.note(loaded);
+        }
         let size = live.window.inner_size();
         live.engine.render(
             0,
@@ -381,7 +388,9 @@ impl Child {
         if self.drawn.len() >= 60 {
             self.drawn.remove(0);
         }
-        self.drawn.push(Instant::now());
+        let now = Instant::now();
+        self.drawn.push(now);
+        self.trace.frame(now);
         if let Err(error) = live.surface.swap_buffers(&live.context) {
             eprintln!("MilkDrop: present failed: {error}");
         }
@@ -957,7 +966,8 @@ fn frames_per_second(drawn: &[Instant]) -> f32 {
 
 /// What every frame does before drawing, window or not: moves through the
 /// presets and hands the engine the sound since the last frame. Done each
-/// frame, so a finished listing is picked up without a wake.
+/// frame, so a finished listing is picked up without a wake. Returns the
+/// preset it loaded, and how long that took, when one was due.
 pub(super) fn prepare_frame(
     engine: &mut Engine,
     presets: &mut Presets,
@@ -965,18 +975,30 @@ pub(super) fn prepare_frame(
     seconds: u32,
     ring: &Ring,
     cursor: &mut u64,
-) {
+) -> Option<trace::Loaded> {
     presets.refresh(folder, None);
     if presets.current().is_none() && presets.count() > 0 {
         presets.next(false);
     }
     presets.advance(Instant::now(), seconds);
     engine.set_seconds(seconds);
-    if let Some(Request::Load { path, smooth }) = presets.take_request() {
-        engine.load(&path, smooth);
-    }
+    let loaded = match presets.take_request() {
+        Some(Request::Load { path, smooth }) => {
+            // Timed only when the environment asks for it, so an ordinary
+            // load pays two clock reads and nothing else.
+            let started = trace::enabled().then(Instant::now);
+            engine.load(&path, smooth);
+            started.map(|started| trace::Loaded {
+                path,
+                smooth,
+                took: started.elapsed(),
+            })
+        }
+        None => None,
+    };
     let frames = ring.since(cursor, LAG);
     engine.feed_frames(&frames);
+    loaded
 }
 
 /// The window's size in pixels, which the overlay lays itself out for.

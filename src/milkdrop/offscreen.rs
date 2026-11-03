@@ -20,6 +20,7 @@ use super::child::{Args, prepare_frame};
 use super::engine::Engine;
 use super::frames::Frames;
 use super::shm::Ring;
+use super::trace::Trace;
 
 /// How long the app may go without showing the picture before the child
 /// leaves by itself. Longer than the app's own wait before it stops the child
@@ -40,6 +41,8 @@ struct Pump {
     frames: Frames,
     folder: PathBuf,
     presets: Presets,
+    /// Load and frame times per switch, when the environment asks for them.
+    trace: Trace,
     closing: Arc<AtomicBool>,
     beats: u64,
     watched: Instant,
@@ -57,6 +60,7 @@ impl Pump {
             frames,
             folder: args.presets.clone(),
             presets: Presets::new(),
+            trace: Trace::default(),
             closing,
             beats: 0,
             watched: Instant::now(),
@@ -104,7 +108,7 @@ impl Pump {
         if self.presets.current().is_none() && self.presets.count() > 0 {
             self.presets.next(true);
         }
-        prepare_frame(
+        let loaded = prepare_frame(
             engine,
             &mut self.presets,
             &self.folder,
@@ -112,6 +116,9 @@ impl Pump {
             &self.ring,
             &mut self.cursor,
         );
+        if let Some(loaded) = loaded {
+            self.trace.note(loaded);
+        }
         // Nothing to draw for until the app has measured its pane, and
         // nothing worth showing before a preset plays.
         if let Some(size) = self.frames.wanted()
@@ -122,6 +129,7 @@ impl Pump {
         }
         let interval = Duration::from_secs_f32(1.0 / self.fps.max(1) as f32);
         let now = Instant::now();
+        self.trace.frame(now);
         self.due = (self.due + interval).max(now);
     }
 }

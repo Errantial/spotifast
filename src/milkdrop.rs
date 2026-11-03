@@ -39,6 +39,9 @@ pub mod pane;
 /// The shared-memory audio ring between the app and the MilkDrop child.
 #[cfg(feature = "milkdrop")]
 pub mod shm;
+/// Frame and preset-load timings for the child, off unless asked for.
+#[cfg(feature = "milkdrop")]
+mod trace;
 
 /// How long a preset plays before the next fades in.
 pub const DEFAULT_SECONDS: u32 = 10;
