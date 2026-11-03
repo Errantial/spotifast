@@ -113,6 +113,19 @@ first frame after a size change, which pays for projectM making its
 framebuffers again; that one-frame cost is unmeasured and is why the governor
 takes its step at most once per fade.
 
+The governor watches the work inside a frame, not the gap between frames: the
+gap includes the pacing timer's own sleep and its jitter (up to a whole timer
+tick on a machine with a coarse clock), and a governor that reacted to that
+would shrink the picture on a GPU that is keeping up perfectly. The other side
+of that choice is that a GPU which drops frames silently, without ever
+blocking the driver queue, looks cheaper than it is; on a real GPU that is
+what `swap_buffers` and the next frame's first GL call do block on once the
+queue is full, with a frame or two of lag.
+
+The step is multiplied with the user's own quality setting and capped at 4
+(about a quarter of the width and height), so someone who already chose the
+smallest picture gets no further reduction from it.
+
 ## WP4c: frame pacing
 
 The window draws with `SwapInterval::DontWait` and paces itself with a timer:
