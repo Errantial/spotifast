@@ -132,7 +132,103 @@ A smaller run at 320x240 drew frames in about the same time as 640x480
 (steady p50 49.4 ms against 47.5 ms), so on llvmpipe the frame time is not
 mainly pixel count; do not read the resolution as a way to buy frames here.
 
+## WP3: the first draw is most of the switch (llvmpipe, 2026-11-03)
+
+WP3 split a switch into its two halves and budgeted them. The load is
+`Engine::load` (read, parse, HLSL-to-GLSL); the first draw is the first
+`engine.render` of the new preset, where the driver compiles and links its
+shaders. The harness now prints `load=`, `first_draw=`, `switch=` (their
+sum) and `other=` (the rest of the stall frame) on every switch, ranks the
+slowest switches with both halves, and prints the PCM fed each frame. The
+child's `SPOTIFAST_MILKDROP_TRACE` reports the same split.
+
+Same host, folder, sample and command as the baseline above:
+
+```sh
+sfb gl cargo run --release --example milkdrop_stutter -- --presets .perf-presets --count 200 --seconds 3
+```
+
+Two runs before the change (the WP1 harness at the merge commit `d331d61`)
+and two after. The second run of each pair is the table's warm run; Mesa's
+shader cache already held the sample from the first pair, so both tables
+read as warm. The two after runs are 609.5 s and 609.4 s; the two before
+runs are 609.1 s and 609.2 s.
+
+| metric, warm | before | after |
+|---|---:|---:|
+| preset load p50 / p99 / max (ms) | 10.2 / 34.8 / 53.9 | 9.4 / 26.3 / 29.2 |
+| first draw p50 / p99 / max (ms) | not measured | 67.0 / 164.2 / 236.1 |
+| switch (load + first draw) p50 / p99 / max (ms) | not measured | 75.4 / 183.8 / 251.1 |
+| stall frame p50 / p99 / max (ms) | 94.5 / 229.3 / 263.8 | 94.8 / 204.0 / 271.1 |
+| worst frame per switch p50 / p99 / max (ms) | 96.7 / 239.4 / 263.8 | 98.6 / 204.0 / 271.1 |
+| worst frame in the 1 s after a switch, p50 / p99 / max (ms) | 96.3 / 239.4 / 263.8 | 97.4 / 204.0 / 271.1 |
+| frame ms during fade, p50 / p99 (ms) | 75.7 / 130.5 | 76.1 / 142.7 |
+| frame ms steady, p50 / p99 (ms) | 50.0 / 78.8 | 50.7 / 80.1 |
+| fade p99 / steady p99 | 1.66x | 1.78x |
+| achieved frame rate | 13.2 fps | 13.1 fps |
+| loads over 8 ms | 103 of 200 | 101 of 200 |
+| switches over 50 ms | not counted | 185 of 200 |
+
+At the median, the load is 9.4 ms and the first draw 67.0 ms, so about 88%
+of a switch is the first draw. Everything the before run could measure agrees
+within run-to-run noise: the budget changes which presets automatic play
+chooses, not what a switch costs, so there is no frame-time gain to show for
+it. The 50 ms budget is three 60 Hz frames, well above the plan's 25 ms frame
+ceiling; see `src/milkdrop/budget.rs` for why it is deliberately not the
+criterion itself.
+
+The warm switch-cost distribution after is: min 38.1, p10 52.6, p50 75.4,
+p90 109.6, max 251.1 ms. Fifteen presets of the 200 are at or under the
+50 ms budget, so on llvmpipe the skip list would narrow automatic play to
+those fifteen and fall back to the rest once they have all played; on a GPU
+with a driver shader cache the list should be much shorter. The slowest
+switches are shader-heavy presets, not large files:
+
+| rank | switch (ms) | load (ms) | first draw (ms) | preset |
+|---:|---:|---:|---:|---|
+| 1 | 251.1 | 15.0 | 236.1 | suksma - criminally negligent craft and bake sale ... |
+| 2 | 234.4 | 15.4 | 218.9 | $$$ Royal - Mashup (255) |
+| 3 | 183.8 | 19.7 | 164.2 | suksma - selectron validumb blegula auralsect muert |
+| 4 | 174.3 | 12.6 | 161.8 | suksma - veiny texture of your m gloves ... |
+| 5 | 155.3 | 26.3 | 129.0 | amandio c - polar value [shader pimped] |
+| 6 | 143.3 | 19.6 | 123.7 | Adam Eatit Mashup FX 2 martin - disco mix + Lodus ... |
+| 7 | 139.9 | 12.9 | 127.0 | suksma - dotes hostile undertake ... |
+| 8 | 134.5 | 18.8 | 115.7 | shifter + Flexi - liquid circuitry ... |
+| 9 | 129.2 | 18.4 | 110.8 | suksma - fiShbRaiN - witchcraft (phugly shame on remix) ... |
+| 10 | 126.1 | 19.9 | 106.1 | Flexi - intensive shader fractal [suksma comp shader mix] |
+
+### The sound after a long frame
+
+`prepare_frame` calls `Ring::since` once per frame and feeds every frame it
+returns, in order. A long frame therefore hands projectM the audio that frame
+missed in one call. That is catch-up, not duplication: the cursor moves past
+it, the ring test in `shm.rs` checks nothing is fed twice, and projectM's
+analysis is counted in samples, so dropping or spreading the burst would move
+the picture behind the music for good. The harness now prints the count:
+warm, p50 3559 samples (74 ms at 48 kHz), p99 6831, max 13029 (271 ms, on the
+slowest switch frame). The ring holds 22050 frames (459 ms), so neither run
+lost a sample. On this host every frame hands over more than two 60 Hz frames
+of audio, only because llvmpipe draws at 13 fps; a two-frame cap would cap
+every frame here and starve the analysis on any machine that cannot hold
+60 fps. No feed code was changed. The harness's own audio cap was corrected
+from one second to the ring's 22050 frames so it draws from the same sound
+the child would.
+
+### When the load runs
+
+`Child::render` calls `prepare_frame` first, so a switch is the first work
+after the `RedrawRequested` that `about_to_wait` asked for when the frame's
+deadline passed. There is no work in front of the load to move it behind, and
+moving the load later in the frame would only move the same stall to the next
+frame. The harness's `other=` column, the stall frame minus load and first
+draw, is about 20 ms on llvmpipe: the previous frame's present, the audio
+feed and the frame clock, none of it ahead of the load. No code was changed
+for this part. WP4c covers the other half, how the frame deadline relates to
+a real display's vertical blank.
+
 ## What is relative only
+
+
 
 - Absolute frame times (45 to 70 ms steady) are llvmpipe drawing on the
   CPU at 13 to 14 fps, not a GPU at 60. The 60 fps pacing is requested but
