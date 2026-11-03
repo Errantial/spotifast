@@ -291,7 +291,7 @@ impl Presets {
     pub(crate) fn record_switch(&mut self, path: &Path, cost: Duration) {
         let known = !self.slow.allows(path);
         if self.slow.record(path, cost) && !known {
-            log::info!(
+            log::debug!(
                 "MilkDrop: switching to {} costs {:.0} ms, so it is left out of automatic play ({} presets now)",
                 path.display(),
                 cost.as_secs_f64() * 1_000.0,
