@@ -378,8 +378,8 @@ impl Presets {
 
     /// The pick automatic play makes: the same choice as `pick`, but never
     /// a preset whose switch was measured too slow, and never the one
-    /// playing while there is another. When every preset is slow it picks
-    /// as usual rather than stop the picture.
+    /// playing while there is another. When nothing is left to switch to
+    /// without a hitch, it picks as usual rather than stop the picture.
     fn pick_automatic(&self) -> Option<PathBuf> {
         if self.files.is_empty() {
             return None;

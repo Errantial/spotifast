@@ -62,13 +62,11 @@ Components:
    `PossiblyCurrentContext` implement it). The child creates the shared
    context on the main thread, where the window context is known, and sends
    the `NotCurrentContext` to the worker. `Display` is documented `Send +
-   Sync`, and `NotCurrentContext` is `Send`, so the worker can create its own
-   pbuffer surface from the display and config and make the context current
-   there. (Surfaces themselves are not clearly `Send`, so the worker should
-   create its own from the `Display`, not borrow the window's. On WGL this is
-   a `WGL_ARB_pbuffer` surface; on EGL and GLX it is a native pbuffer; if a
-   backend cannot make one, a second, never-shown winit window is the
-   fallback.)
+   Sync`, the context is `Send` (not `Sync`), and a `Surface` is `Send` too,
+   so the main thread can create the worker's surface and send both. The
+   worker renders only to an FBO, so a pbuffer surface is enough (WGL uses
+   `WGL_ARB_pbuffer`; EGL and GLX have native pbuffers). If a backend cannot
+   make one, a second, never-shown winit window is the fallback.
 2. **Second engine.** `Engine::new` becomes a function that can build an
    engine on either thread. projectM initializes one process-wide OpenGL
    resolver on the first `projectm_create()`
