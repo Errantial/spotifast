@@ -23,6 +23,12 @@ path = "src/spotifast.rs"
 name = "milkdrop_stutter"
 required-features = ["milkdrop"]
 
+[[example]]
+# Before/after check of libprojectM changes: hashes every frame the real engine
+# draws from fixed audio and a fixed clock.
+name = "milkdrop_evalcheck"
+required-features = ["milkdrop"]
+
 [dependencies]
 anyhow = "1"
 thiserror = "2"

@@ -200,6 +200,14 @@ impl Engine {
         unsafe { pm::projectm_prepare_preset_data(data.as_ptr()) };
     }
 
+    /// Pins the time projectM gives presets to `seconds` since the first
+    /// frame instead of the wall clock, for checks that must draw the same
+    /// frames on every run.
+    pub fn set_frame_time(&mut self, seconds: f64) {
+        // SAFETY: a live handle.
+        unsafe { pm::projectm_set_frame_time(self.handle, seconds) };
+    }
+
     /// Names the preset a load from memory is for, so a failure it reports
     /// with no filename can still say which one.
     fn remember_loading(&self, path: Option<&Path>) {
