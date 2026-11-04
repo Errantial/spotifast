@@ -38,6 +38,9 @@ pub struct Policy {
     /// frames and not just the work inside it: a GPU can return from the
     /// draw before the picture is ready.
     last_start: Option<Instant>,
+    /// Whether the previous frame loaded a preset. The gap this frame
+    /// measures is that frame's cost, so it is the switch's, not the fade's.
+    previous_switched: bool,
 }
 
 impl Policy {
@@ -47,6 +50,7 @@ impl Policy {
             user_scale: user_scale.clamp(1, MAX_SCALE),
             fps,
             last_start: None,
+            previous_switched: false,
         }
     }
 
@@ -105,8 +109,14 @@ impl Policy {
             .map(|last| frame.start.saturating_duration_since(last))
             .unwrap_or_else(|| now.saturating_duration_since(frame.start));
         self.last_start = Some(frame.start);
+        // The gap from the previous start is the previous frame's cost, so
+        // the frame after a switch reports the switch's long frame. Neither
+        // it nor the switch frame itself says anything about the fade.
+        let switched = loaded.is_some();
+        let pays_for_switch = switched || self.previous_switched;
+        self.previous_switched = switched;
         self.governor
-            .observe(now, interval, frame.fading, loaded.is_some(), self.budget());
+            .observe(now, interval, frame.fading, pays_for_switch, self.budget());
     }
 
     /// The divisor the governor is asking for, apart from the user's setting.
@@ -249,6 +259,69 @@ mod tests {
             );
         }
         assert_eq!(policy.governor_scale(), 1, "a switch judged the fade");
+    }
+
+    /// Drives frames that begin `gaps` apart, the frame at `switch` (an
+    /// index into `gaps`, counted from the second frame) loading a preset,
+    /// and returns the governor's divisor afterwards.
+    fn run_frames(gaps: &[Duration], switch: Option<usize>) -> u32 {
+        let start = Instant::now();
+        let mut presets = fading_presets(start);
+        let mut policy = Policy::new(1, 60);
+        let heavy = loaded("heavy.milk", Duration::from_millis(110));
+        let mut at = start;
+        let frame = policy.begin(&presets, at);
+        policy.ended(&mut presets, &frame, None, Duration::ZERO, at + BUDGET);
+        for (index, gap) in gaps.iter().enumerate() {
+            at += *gap;
+            let frame = policy.begin(&presets, at);
+            let loads = (switch == Some(index)).then_some(&heavy);
+            policy.ended(
+                &mut presets,
+                &frame,
+                loads,
+                Duration::from_millis(5),
+                at + BUDGET,
+            );
+        }
+        policy.governor_scale()
+    }
+
+    /// The gap between two frame starts is the earlier frame's cost, so the
+    /// frame after a switch carries the switch's long frame. It is not a
+    /// fade frame either: a fade four frames late in eight must not be
+    /// tipped over the five-frame threshold by one press of Next.
+    #[test]
+    fn the_frame_after_a_switch_does_not_judge_a_fade() {
+        let late = BUDGET * 3;
+        let mut gaps = vec![late, late, late, late, BUDGET, BUDGET, BUDGET];
+        // The switch frame begins on time and lasts 115 ms, so the frame
+        // after it begins 115 ms later.
+        gaps.push(BUDGET);
+        gaps.push(Duration::from_millis(115));
+        gaps.extend([BUDGET; 8]);
+        let switch = Some(7);
+        assert_eq!(
+            run_frames(&gaps, switch),
+            1,
+            "the switch's own frame counted as a late fade frame"
+        );
+
+        // The same frames without the switch frame: the long gap is then a
+        // late fade frame, the fifth, and the fade steps down. The exclusion
+        // is the switch, not every long gap.
+        gaps.remove(7);
+        assert_eq!(run_frames(&gaps, None), 2);
+    }
+
+    /// Only the switch's own frame is left out: a fade that stays heavy
+    /// after the switch still steps down.
+    #[test]
+    fn a_heavy_fade_after_a_switch_still_steps_down() {
+        let late = BUDGET * 3;
+        let mut gaps = vec![BUDGET, Duration::from_millis(115)];
+        gaps.extend([late; 8]);
+        assert_eq!(run_frames(&gaps, Some(0)), 2);
     }
 
     /// The picture is only ever shrunk by a fade, never by the user's scale
