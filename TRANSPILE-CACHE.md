@@ -280,6 +280,19 @@ and the run continues with every shader transpiled, exactly as with
 `PROJECTM_SHADER_CACHE=0`: the same 5 presets took 12 to 217 ms to load, each
 paying its full transpile.
 
+A directory that exists but cannot be written to is the other half of the
+same rule, and was hit by accident during development: a cache directory
+whose name ended in a space made every write fail. The run was a normal one
+with 33 counted store failures, 33 misses, no error surfaced to the app, and
+no entry in the directory. Store failures never reach the render path.
+
+### Checks
+
+`cargo fmt --check`, `cargo clippy --lib -- -D warnings` and
+`cargo test --lib milkdrop` pass on this branch. The Rust side of this work is
+one `Cargo.toml` pin; the C++ has no unit-test target in this fork, so the
+harness runs and the verify mode are its test.
+
 ### Against the acceptance criteria
 
 | criterion | measured (c) | measured (d) | result |
@@ -331,12 +344,13 @@ That is the whole difference between a 3 ms load and a 100 ms one. A
 | shifter + flexi - liquid circuitry | 71.4 ms | one hit, one rejected |
 | ORB - Stahl - Fire Worm | 99.9 ms | one hit, one rejected |
 
-A rejected shader costs its transpile (about 15 ms for these) plus a driver
-compile that fails (30 to 60 ms on this driver), every time. Caching the
-failure would remove that, and is exactly what this design refuses to do: a
-transpile can fail for a reason that goes away (a texture appears, a driver
-updates), and a cache of failures would then be wrong forever. The right fix
-is upstream, in the presets' shaders or in the parser, not here.
+A rejected shader costs its transpile (about 15 ms for these presets) and then
+a driver compile that fails: the rest of each load above, 35 to 80 ms, is that
+failed compile, by subtraction from the load and the hits. Caching the failure
+would remove it, and is exactly what this design refuses to do: a transpile
+can fail for a reason that goes away (a texture appears, a driver updates),
+and a cache of failures would then be wrong forever. The right fix is
+upstream, in the presets' shaders or in the parser, not here.
 
 ### The rest of the preset
 
@@ -348,7 +362,7 @@ diagnostic build (not part of the fork) put each of those steps between 0.0
 and 3 ms, with the texture loop of a shader at 0.3 to 0.6 ms. That is why the
 warm load is 5.1 ms at the median.
 
-The 39 to 54 loads above 16 ms are the same steps on larger presets (20 to 35
+The 36 to 39 loads above 16 ms are the same steps on larger presets (20 to 35
 KB of preset text, up to 12 samplers) and on frames where the GPU queue is
 still full from the previous preset: `Engine::load` makes GL calls, and a GL
 call can wait. None of it is the transpile, and none of it is something a
@@ -366,17 +380,18 @@ The fade window still costs 1.34x to 1.83x a steady frame, because a fade
 draws both presets, and that cost is fill and geometry, not the transpile. The
 cache moves neither number.
 
-### Where the 1 fps went
+### The frame rate
 
-The frame rate went from 53.3 to 57.1 fps. A switch now costs 11 ms instead of
-135, which removes about 25 s of CPU from a 602 s run (3.4% of wall time and
-the biggest single hitch per switch), but the remaining 200 loads still add
-2.35 s and the fades and heavy presets still dominate the average.
+The frame rate went from 53.3 to 55.5-57.5 fps across runs. A switch now costs
+11 ms instead of 135, which removes about 25 s of CPU from a 602 s run (3.4%
+of wall time and the biggest single hitch per switch), but the remaining 200
+loads still add 2.3 to 2.6 s and the fades and heavy presets still dominate the
+average.
 
 ## What was not compiled
 
-Only Windows (MSVC 19.51, x64, Ninja, vcpkg) was compiled and run. The change
-is written to be portable but two targets were not built here:
+Only Windows (MSVC 19.51, x64, Ninja, vcpkg) was compiled and run; macOS and
+Linux were not. The change is written to be portable:
 
 - macOS and Linux: the cache uses `std::filesystem`, `std::mutex`,
   `std::ifstream` and `<chrono>` only. `_dupenv_s` and `_getpid` are behind
@@ -386,7 +401,7 @@ is written to be portable but two targets were not built here:
   GCC 9 or newer (no `-lstdc++fs`), Clang 7 with libc++ 7, and CMake 3.8 or
   newer for `cxx_std_17`. No platform file API is called directly.
 - The Windows path itself was exercised, both the default directory and
-  `PROJECTM_SHADER_CACHE_DIR`.
+  `PROJECTM_SHADER_CACHE_DIR`, so nothing on it is untested.
 
 ## Risks
 
