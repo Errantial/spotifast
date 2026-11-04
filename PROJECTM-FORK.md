@@ -19,15 +19,26 @@ already seen, and skipping it is what the fork's cache does
 
 | link | repository | branch | commit | holds |
 |---|---|---|---|---|
-| 1 | [Errantial/projectm](https://github.com/Errantial/projectm) (fork of crmne/projectm) | `wp7-shader-cache` | `686dfb969` | `crmne/projectm` `spotifast` plus the preset shader transpile cache |
-| 2 | [Errantial/projectm-rs](https://github.com/Errantial/projectm-rs) (fork of crmne/projectm-rs) | `wp7-shader-cache` | `0b1e4ef` | `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`) with `projectm-sys/libprojectM` pointed at link 1 |
+| 1 | [Errantial/projectm](https://github.com/Errantial/projectm) (fork of crmne/projectm) | `wp7-shader-cache` | `05178a4f9` | `crmne/projectm` `spotifast` plus the preset shader transpile cache |
+| 2 | [Errantial/projectm-rs](https://github.com/Errantial/projectm-rs) (fork of crmne/projectm-rs) | `wp7-shader-cache` | `8ad31cf` | `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`) with `projectm-sys/libprojectM` pointed at link 1 |
 | 3 | `Errantial/spotifast` | `wp7-transpile-cache` | see `git log` | `Cargo.toml` pins `projectm-sys` to link 2 |
 
 `Cargo.toml`'s `[patch]` section is what ties Spotifast to the chain:
 
 ```toml
-projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "0b1e4efe009033edbb41e5b3b26c1af5f1c7e551" }
+projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "8ad31cf7f4d1f6a0c4e89b8431444505246b368e" }
 ```
+
+Link 1 carries three commits on the `spotifast` branch:
+
+| commit | what |
+|---|---|
+| `686dfb969` | the cache: `ShaderTranspileCache`, the split transpile in `MilkdropShader`, `Shader::Reset`, and `cxx_std_17` for the `MilkdropPreset` target |
+| `7bb27c4e5` | keep the cache lock over the whole write, create the directory with one call, read the debug switches before the disable switch |
+| `05178a4f9` | log why the cache is disabled, and label the per-hit timing for the driver compile only |
+
+Link 2 carries three commits: `0b1e4ef` (the submodule change), `ba70411`
+(pointer to `7bb27c4e5`) and `8ad31cf` (pointer to `05178a4f9`).
 
 ### What link 1 adds on top of the `spotifast` branch
 
