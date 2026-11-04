@@ -186,8 +186,19 @@ mod tests {
             start + BUDGET,
         );
         assert!(
+            presets.slow.allows(Path::new("heavy.milk")),
+            "one slow switch is only counted"
+        );
+        policy.ended(
+            &mut presets,
+            &frame,
+            Some(&heavy),
+            Duration::from_millis(5),
+            start + BUDGET,
+        );
+        assert!(
             !presets.slow.allows(Path::new("heavy.milk")),
-            "a 205 ms switch was not remembered"
+            "two 205 ms switches were not remembered"
         );
 
         // A cheap one is not recorded, and stays available to automatic play.
@@ -227,13 +238,16 @@ mod tests {
         let frame = policy.begin(&presets, start + BUDGET * 30);
         assert_eq!(frame.scale, 2, "the switch is drawn at half size");
         let heavy = loaded("heavy.milk", Duration::from_millis(200));
-        policy.ended(
-            &mut presets,
-            &frame,
-            Some(&heavy),
-            Duration::from_millis(5),
-            start + BUDGET * 31,
-        );
+        // Twice, so that a recorded switch would exclude it.
+        for _ in 0..2 {
+            policy.ended(
+                &mut presets,
+                &frame,
+                Some(&heavy),
+                Duration::from_millis(5),
+                start + BUDGET * 31,
+            );
+        }
         assert!(
             presets.slow.allows(Path::new("heavy.milk")),
             "a quarter-size switch was taken at face value"

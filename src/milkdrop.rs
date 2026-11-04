@@ -168,8 +168,8 @@ pub struct Presets {
     /// the child can read its file while this one plays. It joins `history`
     /// only when it plays. Kept in step with `random`, `files` and `at`.
     planned: Option<PathBuf>,
-    /// Presets whose switch was measured too slow to choose by themselves.
-    /// Keys and clicks still reach them.
+    /// Presets whose switch was measured too slow, twice, to choose by
+    /// themselves. Keys and clicks still reach them.
     slow: budget::SlowPresets,
     pending: Option<Request>,
     /// When the playing preset was asked for, which its time counts from.
@@ -296,7 +296,9 @@ impl Presets {
     }
 
     /// Notes what changing to a preset cost the frame that loaded it, so a
-    /// preset that makes the picture jump is left out of automatic play.
+    /// preset that makes the picture jump is left out of automatic play once
+    /// it has done so on two switches. The first slow switch is often the one
+    /// that pays for work done once (a cold shader cache), so it only counts.
     ///
     /// The child reports every switch it draws; the measuring harness sends
     /// the same number through the same door.
@@ -304,7 +306,7 @@ impl Presets {
         let known = !self.slow.allows(path);
         if self.slow.record(path, cost) && !known {
             log::debug!(
-                "MilkDrop: switching to {} costs {:.0} ms, so it is left out of automatic play ({} presets now)",
+                "MilkDrop: switching to {} costs {:.0} ms, its second slow switch, so it is left out of automatic play ({} presets now)",
                 path.display(),
                 cost.as_secs_f64() * 1_000.0,
                 self.slow.len()
@@ -1114,12 +1116,39 @@ mod tests {
         assert_eq!(ahead, Some(c), "the preset now after a, not the one gone");
     }
 
+    /// Two switches over the budget, which is what keeps a preset out of
+    /// automatic play.
+    fn make_slow(presets: &mut Presets, path: &Path) {
+        presets.record_switch(path, Duration::from_millis(120));
+        presets.record_switch(path, Duration::from_millis(120));
+    }
+
+    /// One slow switch, typically the cold first one, leaves a preset in
+    /// automatic play; the second takes it out.
+    #[test]
+    fn automatic_play_waits_for_a_second_slow_switch() {
+        let mut presets = playing(&["a.milk", "b.milk", "c.milk"]);
+        presets.record_switch(Path::new("b.milk"), Duration::from_millis(400));
+        assert!(presets.slow.allows(Path::new("b.milk")));
+        presets.record_switch(Path::new("b.milk"), Duration::from_millis(5));
+        assert!(presets.slow.allows(Path::new("b.milk")));
+        // The planned pick is b; automatic play still takes it.
+        assert_eq!(presets.lookahead(), Some(Path::new("b.milk")));
+        presets.advance(presets.started + Duration::from_secs(10), 10);
+        assert_eq!(
+            asked_for(&mut presets),
+            Some((PathBuf::from("b.milk"), true))
+        );
+        presets.record_switch(Path::new("b.milk"), Duration::from_millis(60));
+        assert!(!presets.slow.allows(Path::new("b.milk")));
+    }
+
     /// A preset whose switch is too slow is passed over when the app
     /// changes preset by itself, and the following one plays.
     #[test]
     fn automatic_play_passes_over_a_slow_preset() {
         let mut presets = playing(&["a.milk", "b.milk", "c.milk"]);
-        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        make_slow(&mut presets, Path::new("b.milk"));
         let start = presets.started;
         presets.advance(start + Duration::from_secs(10), 10);
         assert_eq!(
@@ -1133,7 +1162,7 @@ mod tests {
     #[test]
     fn a_key_still_reaches_a_slow_preset() {
         let mut presets = playing(&["a.milk", "b.milk", "c.milk"]);
-        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        make_slow(&mut presets, Path::new("b.milk"));
         presets.next(false);
         assert_eq!(
             asked_for(&mut presets),
@@ -1148,7 +1177,7 @@ mod tests {
         let mut presets = playing(&["a.milk", "b.milk", "c.milk"]);
         presets.next(false);
         presets.take_request();
-        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        make_slow(&mut presets, Path::new("b.milk"));
         presets.next(false);
         presets.take_request();
         presets.previous();
@@ -1171,7 +1200,7 @@ mod tests {
         presets.previous();
         presets.take_request();
         assert_eq!(presets.current(), Some(Path::new("b.milk")));
-        presets.record_switch(Path::new("c.milk"), Duration::from_millis(120));
+        make_slow(&mut presets, Path::new("c.milk"));
         presets.advance(presets.started + Duration::from_secs(10), 10);
         assert_eq!(
             asked_for(&mut presets),
@@ -1200,7 +1229,7 @@ mod tests {
         let files = presets.files.clone();
         for file in &files {
             if file != &fast {
-                presets.record_switch(file, Duration::from_millis(120));
+                make_slow(&mut presets, file);
             }
         }
         presets.advance(presets.started + Duration::from_secs(10), 10);
@@ -1213,8 +1242,8 @@ mod tests {
     #[test]
     fn automatic_play_goes_on_when_every_preset_is_slow() {
         let mut presets = playing(&["a.milk", "b.milk"]);
-        presets.record_switch(Path::new("a.milk"), Duration::from_millis(120));
-        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        make_slow(&mut presets, Path::new("a.milk"));
+        make_slow(&mut presets, Path::new("b.milk"));
         presets.advance(presets.started + Duration::from_secs(10), 10);
         assert_eq!(
             asked_for(&mut presets),
@@ -1227,7 +1256,7 @@ mod tests {
     #[test]
     fn a_key_plays_the_slow_pick_ahead() {
         let mut presets = playing(&["a.milk", "b.milk", "c.milk"]);
-        presets.record_switch(Path::new("b.milk"), Duration::from_millis(120));
+        make_slow(&mut presets, Path::new("b.milk"));
         let ahead = presets.lookahead().unwrap().to_path_buf();
         assert_eq!(ahead, PathBuf::from("b.milk"));
         presets.next(false);
