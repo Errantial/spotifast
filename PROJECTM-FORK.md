@@ -19,17 +19,18 @@ already seen, and skipping it is what the fork's cache does
 
 | link | repository | branch | commit | holds |
 |---|---|---|---|---|
-| 1 | [Errantial/projectm](https://github.com/Errantial/projectm) (fork of crmne/projectm) | `wp8-stutter-fixes` | `d3d81668e` | `crmne/projectm` `spotifast` plus the preset shader transpile cache and the WP8 stutter fixes |
-| 2 | [Errantial/projectm-rs](https://github.com/Errantial/projectm-rs) (fork of crmne/projectm-rs) | `wp8-stutter-fixes` | `ea2d84e` | `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`) with `projectm-sys/libprojectM` pointed at link 1 |
-| 3 | `Errantial/spotifast` | `wp8-stutter-fixes` | see `git log` | `Cargo.toml` pins `projectm-sys` to link 2 |
+| 1 | [Errantial/projectm](https://github.com/Errantial/projectm) (fork of crmne/projectm) | `wp9-fade-eel` | `5749d6a1d` | `crmne/projectm` `spotifast` plus the preset shader transpile cache, the WP8 stutter fixes and the WP9 fade and expression changes |
+| 2 | [Errantial/projectm-rs](https://github.com/Errantial/projectm-rs) (fork of crmne/projectm-rs) | `wp9-fade-eel` | `08d2eb9` | `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`) with `projectm-sys/libprojectM` pointed at link 1 |
+| 3 | `Errantial/spotifast` | `wp9-fade-eel` | see `git log` | `Cargo.toml` pins `projectm-sys` to link 2 |
 
-The `wp7-shader-cache` branches (link 1 `05178a4f9`, link 2 `8ad31cf`) are
-unchanged; `wp8-stutter-fixes` starts from them.
+The `wp7-shader-cache` branches (link 1 `05178a4f9`, link 2 `8ad31cf`) and
+the `wp8-stutter-fixes` branches (link 1 `d3d81668e`, link 2 `ea2d84e`) are
+unchanged; each later branch starts from the one before it.
 
 `Cargo.toml`'s `[patch]` section is what ties Spotifast to the chain:
 
 ```toml
-projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "ea2d84ec529302f20e6cd456e162f894efe8c3df" }
+projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "08d2eb9a46429b056852d9902c513ee99b66865a" }
 ```
 
 Link 1 carries three WP7 commits on the `spotifast` branch:
@@ -50,16 +51,25 @@ and five WP8 commits on top of them:
 | `63a7ba68b` | the writer thread reads each new entry back once, so the antivirus scan of a new file is not paid by the render thread |
 | `d3d81668e` | `TextureManager` rescans the texture folders in the background between preset loads instead of on the render thread at every load |
 
-Link 2 carries four commits: `0b1e4ef` (the submodule change), `ba70411`
-(pointer to `7bb27c4e5`), `8ad31cf` (pointer to `05178a4f9`) and, on
-`wp8-stutter-fixes`, `ea2d84e` (pointer to `d3d81668e`, and `.gitmodules`
-following that branch).
+and two WP9 commits on top of those:
+
+| commit | what |
+|---|---|
+| `a832e3501` | `CustomShape` runs every instance's code first and then uploads all instances' vertices in one buffer upload per frame, drawing each instance from its range with the same state as before |
+| `5749d6a1d` | `projectm_prepare_preset_data()`: parse a preset, compile its expression code and run the independent start of its per-frame init code on any thread; `projectm_load_preset_data()` with the same bytes adopts the result (`PreparedPreset`, `InitCodeSplit`, adopt constructors on the five expression contexts, `tests/libprojectM/InitCodeSplitTest.cpp`) |
+
+Link 2 carries five commits: `0b1e4ef` (the submodule change), `ba70411`
+(pointer to `7bb27c4e5`), `8ad31cf` (pointer to `05178a4f9`), on
+`wp8-stutter-fixes` `ea2d84e` (pointer to `d3d81668e`), and on
+`wp9-fade-eel` `08d2eb9` (pointer to `5749d6a1d`); each of the last two also
+makes `.gitmodules` follow its branch.
 
 ### What link 1 adds on top of the `spotifast` branch
 
 `crmne/projectm`'s `spotifast` branch (`ffb109857`) is upstream `master` plus
 a length check on HLSL identifiers, kept until projectM releases it. On top of
-that, `wp8-stutter-fixes` adds (the cache itself is WP7's; WP8 changed it and added the rest):
+that, `wp9-fade-eel` adds (the cache itself is WP7's; WP8 changed it and
+added the texture rescans; WP9 added the last three items):
 
 - `src/libprojectM/MilkdropPreset/ShaderTranspileCache.{hpp,cpp}`: the
   persistent cache, its SHA-256 key, its reject entries and its bounded,
@@ -81,11 +91,24 @@ that, `wp8-stutter-fixes` adds (the cache itself is WP7's; WP8 changed it and ad
   started at the previous load.
 - `tests/libprojectM/ShaderTranspileCacheTest.cpp` and its line in
   `tests/libprojectM/CMakeLists.txt`: GoogleTest tests of the cache.
+- `src/libprojectM/MilkdropPreset/CustomShape.{hpp,cpp}`: one vertex upload
+  per buffer per frame for all of a shape's instances, instead of one per
+  instance.
+- `src/libprojectM/MilkdropPreset/PreparedPreset.{hpp,cpp}`,
+  `InitCodeSplit.{hpp,cpp}`, the expression contexts, `CustomWaveform`,
+  `CustomShape`, `MilkdropPreset`, `Factory`, `PresetState`, `ProjectM` and
+  `ProjectMCWrapper.cpp`, and `projectm_prepare_preset_data()` in
+  `src/api/include/projectM-4/core.h`: a preset's expression code compiled
+  ahead of its switch on the caller's thread. `PresetState` keeps every
+  original member at its offset (a custom wave with a large `sep` reads
+  before the audio arrays, onto the q variables and registers).
+- `tests/libprojectM/InitCodeSplitTest.cpp`: the init code split, run whole
+  and split against projectm-eval.
 
 ### What link 2 adds
 
 Only the submodule: `.gitmodules` points at `Errantial/projectm` on
-`wp8-stutter-fixes`, and the recorded gitlink is link 1's commit. Its own base
+`wp9-fade-eel`, and the recorded gitlink is link 1's commit. Its own base
 is `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`), which Spotifast
 needed before this branch for the CMake generator and the vcpkg triplet the
 `projectm-sys` build script chooses.
@@ -94,12 +117,12 @@ needed before this branch for the CMake generator and the vcpkg triplet the
 
 Always work from the oldest link up, and never rewrite a published commit.
 
-1. In a checkout of `Errantial/projectm` on `wp8-stutter-fixes`, make the
+1. In a checkout of `Errantial/projectm` on `wp9-fade-eel`, make the
    libprojectM change, build it through Spotifast, commit and push.
-2. In a checkout of `Errantial/projectm-rs` on `wp8-stutter-fixes`:
+2. In a checkout of `Errantial/projectm-rs` on `wp9-fade-eel`:
 
    ```sh
-   git -C projectm-sys/libprojectM fetch origin wp8-stutter-fixes
+   git -C projectm-sys/libprojectM fetch origin wp9-fade-eel
    git -C projectm-sys/libprojectM checkout <new projectm commit>
    git add projectm-sys/libprojectM && git commit && git push
    ```
@@ -124,13 +147,21 @@ by default. `TRANSPILE-CACHE.md` records what they showed on this laptop.
 The cache's own tests (`ShaderTranspileCacheTest.cpp`) build in libprojectM's
 `projectM-unittest` target when `BUILD_TESTING=ON`; `projectm-sys` builds with
 it off, so on this laptop they were built and run on their own against
-vcpkg's GoogleTest (`TRANSPILE-CACHE.md`, "Checks").
+vcpkg's GoogleTest (`TRANSPILE-CACHE.md`, "Checks"). `InitCodeSplitTest.cpp`
+was built and run the same way, against the projectm-eval 1.0.5 sources
+`projectm-sys` links.
+
+`examples/milkdrop_evalcheck.rs` draws a fixed sample of presets from fixed
+audio and a fixed clock and prints a hash of every frame; two builds that
+print the same lines drew the same frames. `PERF_NOTES.md` (WP9) records how
+the WP9 changes were checked with it.
 
 ## Dropping it
 
-The fork exists only until projectM carries the cache itself. Then:
+The fork exists only until projectM carries the cache and the WP9 changes
+itself. Then:
 
-1. Send link 1's commit upstream (or wait for an equivalent), and drop the
+1. Send link 1's commits upstream (or wait for equivalents), and drop the
    submodule override in link 2 by pointing `projectm-sys/libprojectM` back at
    `crmne/projectm` `spotifast`.
 2. When a `projectm-sys` release also has the generator and triplet fixes,
@@ -138,5 +169,6 @@ The fork exists only until projectM carries the cache itself. Then:
    this file.
 
 Nothing outside `Cargo.toml`, this file and `TRANSPILE-CACHE.md` refers to
-these repositories, and Spotifast itself needs no code change to use or stop
-using them.
+these repositories. Spotifast calls one function only the fork has,
+`projectm_prepare_preset_data()` (`Engine::prepare_data`, used by
+`src/milkdrop/prefetch.rs`); stopping the fork means removing that call.
