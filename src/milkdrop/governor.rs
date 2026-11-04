@@ -5,7 +5,7 @@
 //! [`super::CROSSFADE_SECONDS`], so a GPU that keeps up with one preset can
 //! still miss the beat for the whole fade. This watches what each frame of a
 //! fade costs and asks the engine for a smaller picture when enough frames in
-//! a row run over the budget.
+//! a row run well over the budget.
 //!
 //! It is deliberately deaf outside a fade: a slow preset on its own is the
 //! detail the user asked for, and the picture is never shrunk on their
@@ -21,6 +21,11 @@ use std::time::{Duration, Instant};
 const WINDOW: usize = 8;
 /// How many frames of the window must run over the budget to step down.
 const LATE_FRAMES: usize = 5;
+/// How far over the budget a frame must run to count as late. The plan's own
+/// tolerance for a fade is a quarter over the steady frame time, so a frame
+/// the machine still delivered inside that is not what makes a fade heavy;
+/// counting those would shrink the picture on nearly every fade at 60 fps.
+const OVERRUN: (u32, u32) = (5, 4);
 /// What the engine divides the picture by while a fade is too heavy. Two is
 /// a quarter of the pixels, which is the one lever big enough to matter and
 /// cheap enough to explain.
@@ -76,11 +81,16 @@ impl Governor {
 
     /// One frame's cost, and whether a preset is fading in right now.
     ///
-    /// A frame over the budget in a fade means the two presets did not fit;
-    /// [`LATE_FRAMES`] of them in the window means the whole fade will not,
-    /// so the picture gives up detail until it ends. Outside a fade nothing
-    /// is decided, and the window is emptied: a slow preset playing before a
-    /// fade must not make that fade look heavy on its first frame.
+    /// `frame` is the gap between this frame's start and the previous one,
+    /// which is what a person sees: on a GPU the drawing call can return long
+    /// before the picture is ready, so the work inside one frame is not the
+    /// cost of the frame.
+    ///
+    /// A frame well over the budget in a fade means the two presets did not
+    /// fit; [`LATE_FRAMES`] of them in the window means the whole fade will
+    /// not, so the picture gives up detail until it ends. Outside a fade
+    /// nothing is decided, and the window is emptied: a slow preset playing
+    /// before a fade must not make that fade look heavy on its first frame.
     ///
     /// A frame that paid for a preset switch is not a fade frame: its cost is
     /// the switch's, which is one long frame whether or not a fade runs, so
@@ -127,25 +137,37 @@ impl Governor {
             return;
         }
         if !self.fading {
-            // A new fade begins: its frames are the only ones that judge it.
+            // A new fade begins: its frames are the only ones that judge it,
+            // and it starts at the detail the user asked for. The hold below
+            // covers the seam between a fade and a steady picture; when
+            // another fade begins instead, there is no seam, and a short
+            // preset turn must not leave the picture small for good.
             self.fading = true;
             self.restart();
+            self.scale = 1;
         }
         // A fade decides for itself; a hold from an earlier one is over.
         self.held = None;
+        let late = is_late(frame, budget);
         if self.filled == WINDOW {
-            self.late -= usize::from(self.window[self.at] > budget);
+            self.late -= usize::from(is_late(self.window[self.at], budget));
         } else {
             self.filled += 1;
         }
         self.window[self.at] = frame;
-        self.late += usize::from(frame > budget);
+        self.late += usize::from(late);
         self.at = (self.at + 1) % WINDOW;
 
         if self.scale == 1 && self.filled == WINDOW && self.late >= LATE_FRAMES {
             self.scale = DOWN;
         }
     }
+}
+
+/// Whether a frame ran far enough over the budget to mean the fade cannot
+/// keep the frame rate.
+fn is_late(frame: Duration, budget: Duration) -> bool {
+    frame > budget * OVERRUN.0 / OVERRUN.1
 }
 
 #[cfg(test)]
@@ -336,6 +358,37 @@ mod tests {
         assert_eq!(governor.scale(), 1, "and full detail is back");
     }
 
+    /// A frame that misses the budget by a sliver is not a fade that cannot
+    /// keep up: at 60 fps every frame lands within a millisecond of the
+    /// budget, and counting those would shrink the picture on every fade.
+    #[test]
+    fn a_frame_a_little_over_the_budget_does_not_shrink_the_picture() {
+        let mut governor = Governor::new();
+        let base = Instant::now();
+        for index in 0..400 {
+            observe_frame(
+                &mut governor,
+                base,
+                index,
+                BUDGET * OVERRUN.0 / OVERRUN.1,
+                true,
+            );
+            assert_eq!(governor.scale(), 1, "frame {index} is inside the slack");
+        }
+
+        // Past the slack, and the fade is heavy.
+        for index in 400..400 + WINDOW as u32 {
+            observe_frame(
+                &mut governor,
+                base,
+                index,
+                BUDGET * OVERRUN.0 / OVERRUN.1 + BUDGET / 8,
+                true,
+            );
+        }
+        assert_eq!(governor.scale(), DOWN);
+    }
+
     /// A slow preset playing before a fade must not make that fade look
     /// heavy: the window holds only frames of the fade in progress, so its
     /// first frames cannot finish a verdict the last preset started.
@@ -364,6 +417,30 @@ mod tests {
             observe_frame(&mut governor, base, index, BUDGET * 3, true);
         }
         assert_eq!(governor.scale(), DOWN, "the fade's own cost is seen");
+    }
+
+    /// A fade that starts before the last one's hold runs out still starts at
+    /// the user's detail: with preset turns shorter than the fade plus the
+    /// hold, the picture would otherwise stay small for good.
+    #[test]
+    fn a_new_fade_starts_at_full_detail() {
+        let mut governor = Governor::new();
+        let base = Instant::now();
+        for index in 0..WINDOW as u32 {
+            observe_frame(&mut governor, base, index, BUDGET * 3, true);
+        }
+        assert_eq!(governor.scale(), DOWN);
+
+        // The fade ends; the hold starts. The next fade begins before it is
+        // over, as it would at a two- or three-second preset turn.
+        governor.observe(base + BUDGET * 20, BUDGET / 2, false, false, BUDGET);
+        assert_eq!(governor.scale(), DOWN, "held at the seam");
+        observe_frame(&mut governor, base, 21, BUDGET / 2, true);
+        assert_eq!(
+            governor.scale(),
+            1,
+            "the new fade inherited the last one's detail"
+        );
     }
 
     /// A new fade decides from its own frames: the window of the one before

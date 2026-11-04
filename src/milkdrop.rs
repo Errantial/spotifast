@@ -41,15 +41,18 @@ pub mod overlay;
 /// The app's side of a pane's picture: the stream of frames and its child.
 #[cfg(feature = "milkdrop")]
 pub mod pane;
+/// What a frame may cost, and how much detail a fade may give up for it.
+#[cfg(feature = "milkdrop")]
+pub mod policy;
 /// Reading the next preset's file while the one playing is on screen.
 #[cfg(feature = "milkdrop")]
-mod prefetch;
+pub mod prefetch;
 /// The shared-memory audio ring between the app and the MilkDrop child.
 #[cfg(feature = "milkdrop")]
 pub mod shm;
 /// Frame and preset-load timings for the child, off unless asked for.
 #[cfg(feature = "milkdrop")]
-mod trace;
+pub mod trace;
 
 /// How long a preset plays before the next fades in.
 pub const DEFAULT_SECONDS: u32 = 10;
@@ -294,7 +297,10 @@ impl Presets {
 
     /// Notes what changing to a preset cost the frame that loaded it, so a
     /// preset that makes the picture jump is left out of automatic play.
-    pub(crate) fn record_switch(&mut self, path: &Path, cost: Duration) {
+    ///
+    /// The child reports every switch it draws; the measuring harness sends
+    /// the same number through the same door.
+    pub fn record_switch(&mut self, path: &Path, cost: Duration) {
         let known = !self.slow.allows(path);
         if self.slow.record(path, cost) && !known {
             log::debug!(

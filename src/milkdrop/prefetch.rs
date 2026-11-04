@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
 /// The file read ahead, and the thread that reads it.
-pub(super) struct Prefetch {
+pub struct Prefetch {
     /// Asks the worker for a path; `None` once the thread could not start
     /// or has gone.
     requests: Option<Sender<PathBuf>>,
@@ -28,7 +28,7 @@ pub(super) struct Prefetch {
 impl Prefetch {
     /// Starts the worker. A thread that cannot start leaves every switch
     /// reading its file as before.
-    pub(super) fn start() -> Self {
+    pub fn start() -> Self {
         let (requests, asked) = mpsc::channel::<PathBuf>();
         let (read, readings) = mpsc::channel();
         let spawned = std::thread::Builder::new()
@@ -69,7 +69,7 @@ impl Prefetch {
 
     /// Asks for the preset the next switch will play. A frame that asks for
     /// the same one again does nothing.
-    pub(super) fn want(&mut self, next: Option<&Path>) {
+    pub fn want(&mut self, next: Option<&Path>) {
         let Some(next) = next else {
             return;
         };
@@ -88,7 +88,7 @@ impl Prefetch {
     /// The bytes read ahead for `path`, when they are ready; this never
     /// waits. A miss leaves the caller to load the file, which is what a
     /// manual Next needs while the read is still under way.
-    pub(super) fn take(&mut self, path: &Path) -> Option<Vec<u8>> {
+    pub fn take(&mut self, path: &Path) -> Option<Vec<u8>> {
         loop {
             match self.read.try_recv() {
                 Ok((read_path, Ok(bytes))) => {

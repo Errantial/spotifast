@@ -27,25 +27,12 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, ResizeDirection, Window, WindowId};
 
 use super::engine::Engine;
-use super::governor::Governor;
 use super::overlay::{Backing, Overlay, Place, Row, Span};
+use super::policy::{MAX_SCALE, Policy};
 use super::prefetch::Prefetch;
 use super::shm::Ring;
 use super::trace::{self, Trace};
 use super::{DEFAULT_FPS, DEFAULT_SECONDS, LAG, MIN_SIZE, Presets, Request};
-
-/// The smallest picture the settings and the fade's own governor may ask for
-/// together: a quarter of the width and height, which is already a mosaic.
-const MAX_SCALE: u32 = 4;
-
-/// Whether a switch drawn at `drawn` says what switching to that preset
-/// costs the user. `user` is the detail their own setting asks for; when the
-/// governor's step down cannot shrink the picture any further (they already
-/// chose the smallest one), the switch is drawn exactly as they would see it
-/// and its cost is worth recording.
-fn records_switch(user: u32, drawn: u32) -> bool {
-    drawn == user
-}
 
 /// What the child is told to do, on stdin, as one JSON object per line.
 #[derive(Debug, Default, Deserialize)]
@@ -237,7 +224,7 @@ struct Child {
     scale: u32,
     /// Whether a fade has to be drawn with less detail than the setting asks
     /// for to keep the frame rate.
-    quality: Governor,
+    policy: Policy,
     seconds: u32,
     pointer: PhysicalPosition<f64>,
     last_click: Option<Instant>,
@@ -278,7 +265,7 @@ impl Child {
             modifiers: winit::keyboard::ModifiersState::empty(),
             fps,
             scale,
-            quality: Governor::new(),
+            policy: Policy::new(scale, fps),
             seconds,
             pointer: PhysicalPosition::new(0.0, 0.0),
             last_click: None,
@@ -316,14 +303,6 @@ impl Child {
     /// number of frames a second, or nothing at all when uncapped.
     fn frame_interval(&self) -> Option<Duration> {
         (self.fps != 0).then(|| Duration::from_secs_f32(1.0 / self.fps as f32))
-    }
-
-    /// What a frame may cost before a fade is drawn with less detail: the
-    /// limit it was asked to keep, or the 60 frames a second projectM is told
-    /// about when the limit is uncapped.
-    fn frame_budget(&self) -> Duration {
-        self.frame_interval()
-            .unwrap_or_else(|| Duration::from_secs_f32(1.0 / 60.0))
     }
 
     /// Asks the screen the window is on how often it refreshes.
@@ -396,19 +375,11 @@ impl Child {
         // preset load itself is not mistaken for the fade being too heavy.
         // A frame that does load one is told apart at the end, where the
         // governor is given the frame.
-        let fading = self.presets.fading(started);
-        let budget = self.frame_budget();
-        // The user's own setting, and the fade governor's step down on top
-        // of it. The step is a divisor, so the second is never a bigger
-        // picture than the first.
-        let user_scale = self.scale.clamp(1, MAX_SCALE);
-        let scale = user_scale
-            .saturating_mul(self.quality.scale())
-            .min(MAX_SCALE);
+        let frame = self.policy.begin(&self.presets, started);
         let Some(live) = &mut self.live else {
             return;
         };
-        let loaded = prepare_frame(
+        let mut loaded = prepare_frame(
             &mut live.engine,
             &mut self.presets,
             &self.args.presets,
@@ -422,22 +393,13 @@ impl Child {
         let draw_started = loaded.is_some().then(Instant::now);
         let size = live.window.inner_size();
         live.engine
-            .render(0, 0, size.width.max(1), size.height.max(1), scale);
-        if let Some(mut loaded) = loaded {
-            loaded.first_draw = draw_started
-                .map(|started| started.elapsed())
-                .unwrap_or_default();
-            // Only a switch drawn at the detail the picture normally has says
-            // what switching to this preset costs: while a fade holds the
-            // governor's step down, the first draw is a quarter of the work,
-            // and the budget would trust a slow preset on the strength of it.
-            // At the user's own lowest detail the step down changes nothing,
-            // and a switch there is exactly what a person sees.
-            if records_switch(user_scale, scale) {
-                self.presets
-                    .record_switch(&loaded.path, loaded.switch_cost());
-            }
-            self.trace.note(loaded);
+            .render(0, 0, size.width.max(1), size.height.max(1), frame.scale);
+        let first_draw = draw_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        if let Some(loaded) = &mut loaded {
+            loaded.first_draw = first_draw;
+            self.trace.note(loaded.clone());
         }
         if let Some(overlay) = &mut live.overlay {
             overlay.draw(&live.gl, (size.width, size.height));
@@ -454,12 +416,12 @@ impl Child {
         if let Err(error) = live.surface.swap_buffers(&live.context) {
             eprintln!("MilkDrop: present failed: {error}");
         }
-        self.quality.observe(
+        self.policy.ended(
+            &mut self.presets,
+            &frame,
+            loaded.as_ref(),
+            first_draw,
             Instant::now(),
-            started.elapsed(),
-            fading,
-            draw_started.is_some(),
-            budget,
         );
         self.update_corners();
         self.report_geometry();
@@ -545,6 +507,7 @@ impl ApplicationHandler<Control> for Child {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, control: Control) {
         if let Some(scale) = control.scale {
             self.scale = scale.clamp(1, MAX_SCALE);
+            self.policy.set_scale(self.scale);
         }
         if let Some(song) = control.song
             && self.song.as_ref() != Some(&song)
@@ -558,6 +521,7 @@ impl ApplicationHandler<Control> for Child {
         }
         if let Some(fps) = control.fps {
             self.fps = fps;
+            self.policy.set_fps(fps);
         }
         if let Some(seconds) = control.seconds {
             self.seconds = seconds;
@@ -1033,7 +997,7 @@ fn frames_per_second(drawn: &[Instant]) -> f32 {
 
 /// What [`prepare_frame`] asks of the engine, so a test can stand in for it
 /// without a window or a GL context.
-pub(super) trait Loads {
+pub trait Loads {
     fn set_seconds(&mut self, seconds: u32);
     fn load_data(&mut self, path: &std::path::Path, data: Vec<u8>, smooth: bool) -> bool;
     fn load(&mut self, path: &std::path::Path, smooth: bool);
@@ -1068,7 +1032,7 @@ impl Loads for Engine {
 /// frame by its cost, and they run in ordinary sessions, where the trace's
 /// report is switched off. [`trace`] only decides whether the numbers are
 /// printed.
-pub(super) fn prepare_frame(
+pub fn prepare_frame(
     engine: &mut impl Loads,
     presets: &mut Presets,
     folder: &std::path::Path,
@@ -1397,21 +1361,6 @@ mod tests {
             (fps - 50.0).abs() < 0.001,
             "twenty milliseconds a frame is fifty a second, not {fps}"
         );
-    }
-
-    /// A switch is worth recording unless the fade governor's step down drew
-    /// the picture smaller than the user asked for. At the user's own lowest
-    /// detail the step changes nothing, and the switch is exactly what they
-    /// would see.
-    #[test]
-    fn a_switch_is_recorded_unless_the_picture_was_smaller() {
-        assert!(records_switch(1, 1), "the setting's own detail");
-        assert!(
-            records_switch(4, 4),
-            "the user already chose the smallest picture"
-        );
-        assert!(!records_switch(1, 2), "a fade drew it at half size");
-        assert!(!records_switch(3, 4), "the step went past the user's scale");
     }
 
     /// An engine that only counts what it is asked to do, so the frame's

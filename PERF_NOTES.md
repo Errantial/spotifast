@@ -499,3 +499,244 @@ its frames never load through the child.
 - The WP4 pacing probe (under Xvfb) and scale probe (through EGL's
   surfaceless device) are llvmpipe too, and neither has a vblank, so the
   swap interval and the frame-rate lever cannot be judged here at all.
+
+## WP6: the recording fix, the harness on the app's path, and where a switch's time goes (RTX 3080 Laptop, 2026-11-03)
+
+Branch `wp6-fix-stutter`. This is the first section with numbers from a real
+GPU: Windows 11 on the laptop, NVIDIA GeForce RTX 3080 Laptop GPU, driver
+617.14, 1920x1080 at 100%, a hidden 640x480 or 1920x1080 GL window, the
+10,184 `.milk` files of the full Cream of the Crop folder in
+`C:\Users\emilg\sfwp5\presets`. Build: MSVC 18, Ninja, release.
+
+Exact commands (run through `cmd` after `call C:\Users\emilg\sfwp5\env.cmd`):
+
+```sh
+cargo build --release --example milkdrop_stutter
+target\release\examples\milkdrop_stutter.exe --presets C:\Users\emilg\sfwp5\presets --count 200 --seconds 3 --path old
+target\release\examples\milkdrop_stutter.exe --presets C:\Users\emilg\sfwp5\presets --count 200 --seconds 3 --path new
+target\release\examples\milkdrop_stutter.exe --presets C:\Users\emilg\sfwp5\presets --count 200 --seconds 3 --path new --size 1920x1080
+target\release\examples\milkdrop_stutter.exe --presets C:\Users\emilg\sfwp5\presets --count 40 --passes 2 --seconds 3 --path new
+target\release\examples\milkdrop_stutter.exe --presets C:\Users\emilg\sfwp5\presets --count 40 --seconds 6 --path old
+target\release\examples\milkdrop_stutter.exe --presets C:\Users\emilg\sfwp5\presets --count 40 --seconds 6 --path new
+```
+
+Each 200-preset run takes about 10 minutes here; 40 presets about 2 (3 s
+each) or 4 (6 s each) minutes. Runs are one at a time, nothing else drawing.
+
+### The harness now drives the app's frame rules
+
+`--path new` (the default) calls `milkdrop::child::prepare_frame` (so it uses
+`Presets::lookahead`, the prefetch worker, `Engine::load_data`, the
+slow-preset list and `Presets::advance`), `milkdrop::policy::Policy` (the
+same fade governor and switch-recording rule as the window child) and the
+same 48x36 mesh, soft cut and 60 fps software clock. Its audio goes through
+the real `shm::Ring` at the analyser's lag. `--path old` keeps the previous
+behaviour (`Engine::load` on the frame, no prefetch, no policy) as the
+baseline. `--passes N` repeats the sample, which is how the slow list is
+shown working.
+
+The sample is hardlinked (or copied, if the file system refuses a link) into
+`%TEMP%\spotifast-milkdrop-sample-<pid>` for `Presets` to list, in the same
+order, and removed when the run ends.
+
+### The recording bug, and the two other review findings
+
+Before this branch the child timed a load only when `SPOTIFAST_MILKDROP_TRACE`
+was set. `record_switch` and the governor's `switched` flag were therefore
+fed nothing in ordinary sessions: the slow list never learned, and the
+governor judged the load frame as a fade frame. A load is now timed
+unconditionally (two clock reads); the trace only decides whether it prints.
+`policy::Policy::ended` is tested with the trace off, and an integration test
+runs `prepare_frame` with a stub engine and asserts the load comes back
+timed.
+
+The other two findings, both in `governor.rs`/`policy.rs`:
+
+- The governor's window held frames from outside a fade, so a slow preset
+  playing before a fade could step the picture down on that fade's first
+  frame. The window now holds only frames of the fade in progress and is
+  reset when a fade begins.
+- A switch drawn while the user's own scale is already 4 was never recorded,
+  because the step down cannot shrink it further and `full_detail()` still
+  said no. The rule is now "the drawn scale equals the user's scale", which
+  is the switch a person actually sees.
+- The trace keeps at most 1000 switches instead of the whole session.
+
+Two more things changed while measuring, both in the governor:
+
+- A frame's cost is now the gap between frame starts, not the work inside
+  the frame. On this GPU `projectm_opengl_render_frame` returns long before
+  the picture is ready, so the work-based number was blind to exactly the
+  GPU-bound fades the governor exists for. Before the change, a 40-preset
+  run at 6 s a preset had the governor step down for 44 of 5874 fade frames;
+  after, 476 of 5807, and only where the frame really missed.
+- A fade that begins before the previous fade's 2 s hold ends now starts at
+  full detail and decides for itself. With preset turns shorter than the fade
+  plus the hold (3 s is a supported setting) the picture used to stay at half
+  size for good after one heavy fade.
+
+The tolerance is also the plan's own: a frame counts as late only when it
+runs more than a quarter over the budget. At 640x480 a 60 fps frame lands
+within a millisecond of 16.7 ms; counting those made nearly every fade step
+down.
+
+### Before and after, 200 presets, 640x480, soft cuts
+
+The old path was run twice to show the driver cache: the first run compiled
+these 200 shader pairs for the first time on this install, the second did
+not. The new path is compared with the warm old run. `p50`/`p99` in ms.
+
+| metric | old, cold | old, warm | new, warm |
+|---|---:|---:|---:|
+| preset load p50 / p99 / max | 142.1 / 264.7 / 343.4 | 107.6 / 204.0 / 217.3 | 109.5 / 204.8 / 376.5 |
+| first draw p50 / p99 / max | 5.1 / 24.4 / 29.7 | 4.4 / 23.5 / 29.8 | 4.8 / 24.4 / 31.8 |
+| switch cost p50 / p99 / max | 147.3 / 281.1 / 346.2 | 113.4 / 205.8 / 223.6 | 115.6 / 210.1 / 385.4 |
+| worst frame per switch p50 / p99 | 162.6 / 293.9 | 127.0 / 228.1 | 132.0 / 244.2 |
+| worst frame in the 1 s after, p99 | 293.9 | 228.1 | 225.5 |
+| loads over 8 ms | 179 of 200 | 165 of 200 | 165 of 200 |
+| switches over 50 ms | 165 of 200 | 161 of 200 | 163 of 200 |
+| fade frame p50 / p99 | 16.7 / 39.1 | 16.7 / 35.1 | 16.7 / 36.7 |
+| steady frame p50 / p99 | 16.7 / 24.4 | 16.6 / 18.2 | 16.7 / 19.1 |
+| fade p99 / steady p99 | 1.61x | 1.93x | 1.92x |
+| achieved frame rate | 54.9 fps | 56.7 fps | 56.4 fps |
+
+Read the two warm columns against each other: the new path does not make the
+switch cheaper, because the switch is projectM's CPU transpile (below), and
+the prefetch only removes the file read. The 20 to 30% between the cold and
+warm old runs is the NVIDIA shader cache: the second compile of the same
+GLSL is nearly free, the first is 15 to 80 ms per program.
+
+### 1920x1080
+
+`--path new --size 1920x1080`, same 200 presets:
+
+| metric | 640x480 | 1920x1080 |
+|---|---:|---:|
+| preset load p50 / p99 | 109.5 / 204.8 | 115.8 / 209.1 |
+| first draw p50 / p99 | 4.8 / 24.4 | 4.6 / 20.0 |
+| switch cost p50 / p99 | 115.6 / 210.1 | 119.8 / 216.4 |
+| fade frame p50 / p99 | 16.7 / 36.7 | 16.7 / 35.5 |
+| steady frame p50 / p99 | 16.7 / 19.1 | 16.7 / 18.6 |
+| achieved frame rate | 56.4 fps | 56.4 fps |
+
+The switch is the same at both sizes (it is the transpile, not the pixels).
+Steady frames still hold 60 fps at 1080p on this GPU, which is why the
+governor has so little to do here.
+
+### Where the load goes: the per-phase numbers
+
+These come from a **local, instrumented copy** of the pinned libprojectM
+(`crmne/projectm-rs` 93852ff, whose `libprojectM` is `crmne/projectm` ffb1098
+on the `spotifast` branch), built with a `[patch]` that is **not on the
+branch** and not proposed for merging. Timers (a `steady_clock` read either
+side of each step, printed when `SPOTIFAST_PM_PHASES` is set) were added to
+`MilkdropPreset::Initialize`, `MilkdropShader::LoadTexturesAndCompile` and
+`TranspileHLSLShader`, `Renderer::Shader::CompileProgram`, and the four
+passes of `HLSLParser::ApplyPreprocessor` in the vendored hlslparser. The
+harness's own `load=` for the same preset agrees with the instrumented
+numbers to within a millisecond, so the instrumentation does not distort
+them.
+
+One preset with both shaders (`smooth abruptness.milk`), the same preset in
+two processes, first compile and then a warm cache, in ms:
+
+| phase | first load | second load |
+|---|---:|---:|
+| read + parse the `.milk` (text) | 1.6 | 1.0 |
+| blur texture and generic shaders | 0.0 | 0.0 |
+| ns-eel: per-frame/per-vertex/custom wave and shape code | 0.7 | 0.2 |
+| framebuffer sizes | 0.4 | 0.5 |
+| **warp shader**: HLSL preprocessor | 45.8 | 41.7 |
+| warp: HLSL parse | 15.2 | 14.1 |
+| warp: GLSL generate | 0.6 | 0.4 |
+| warp: **driver compile + link** | **65.3** | **1.4** |
+| **composite shader**: HLSL preprocessor | 55.6 | 41.3 |
+| composite: HLSL parse | 17.4 | 14.7 |
+| composite: GLSL generate | 0.7 | 0.4 |
+| composite: **driver compile + link** | **74.4** | **1.3** |
+| textures (`samples=`) | 0.0 | 0.0 |
+| **whole load (`Engine::load`)** | **281.9** | **122.9** |
+
+Across five presets with shaders: the preprocessor is 30 to 56 ms per shader
+on 5.6 to 7.0 KB of input (424 to 987 tokens, 79 to 80 macros), the HLSL
+parser 5.5 to 20.6 ms, the generator 0.2 to 0.7 ms, and the driver 15 to 80
+ms cold or 0.7 to 1.8 ms warm per program. Presets without a warp or
+composite shader skip all of it and load in 1.3 to 5 ms. Inside the
+preprocessor, passes 1 (collect `#define`s) and 4 (replace identifiers) are
+20 to 40 ms each; passes 2 and 3 are a few ms. That is about 50 microseconds
+per token in vendored code, and it is the one number in this section worth
+taking upstream as a bug of its own.
+
+The consequence for the plan is blunt: **the floor of a switch on this GPU is
+the CPU transpile, ~85 to 135 ms warm, before the driver is asked anything**.
+A warm driver cache takes the compile from ~140 ms to ~3 ms and cannot touch
+the rest. Moving the transpile off the render thread needs projectM to expose
+a parse/compile step, or the second instance and texture handover in
+`DESIGN-offthread-compile.md`; nothing in this repository can do it through
+`projectm_load_preset_data`.
+
+### The governor on this GPU
+
+`--count 40 --seconds 6`, the same 40 presets, both paths, so the 2 s hold
+fits inside the turn:
+
+| metric | old | new |
+|---|---:|---:|
+| switch p50 / p99 | 109.2 / 226.9 | 122.9 / 267.1 |
+| fade p50 / p99 / max | 16.7 / 36.5 / 75.2 | 16.7 / 38.5 / 249.2 |
+| steady p50 / p99 | 16.7 / 18.9 | 16.7 / 20.1 |
+| governor step-downs | n/a | 476 of 5807 fade frames |
+
+The governor now sees the heavy fades and steps down (4.6% of fade frames in
+the final 200-preset run, i.e. only the heavy ones; the rest are left alone).
+The heavy fades stay 35 to 50 ms at a quarter of the pixels: **the lever does
+not reduce a heavy fade's cost on this GPU**. The final 1920x1080 run had it
+down for 1,063 of 30,207 fade frames, and the fade still cost p99 35.5 ms. The
+cost is per-frame CPU/geometry work inside projectM (the per-vertex equations
+on the 48x36 mesh, the wave and shape geometry, the eel code), not fill, and
+`Engine::render`'s scale only divides pixels. The old test showed the lever
+helping llvmpipe at 1080p; on this GPU it does not help at all, and the only
+thing it changes is sharpness. Keeping it costs a coarser picture during
+heavy fades and buys nothing measurable.
+
+### The slow list, now that it records
+
+`--count 40 --passes 2 --seconds 3 --path new` (80 switches, 4 minutes).
+The two passes are in one process and one cache state, so the difference is
+the list, not the driver:
+
+| metric | pass 1 | pass 2 |
+|---|---:|---:|
+| load p50 / p99 | 117.4 / 247.5 | 2.5 / 129.2 |
+| loads over 8 ms | 32 of 40 | 3 of 40 |
+| loads over 50 ms | 31 of 40 | 3 of 40 |
+| whole run, switch p50 / p99 | 11.2 / 212.0 | |
+| whole run, worst frame per switch p50 / p99 | 34.7 / 225.8 | |
+| whole run, frame rate | 57.1 fps | |
+
+The p99 of the whole run is pass 1, where every slow preset is still met for
+the first time. The medians are the list doing its job: after a preset has
+been measured once, automatic play passes over it, and with 40 presets it
+settles on the eight whose switches are 1.6 to 4.9 ms, cycling them at
+57 fps. Three slow switches still slipped through in pass 2, because a switch
+drawn at reduced detail is deliberately not recorded (it is not the switch a
+person sees), so those presets get another chance and are learned then. On a
+10,000-preset folder the list must still meet each preset once, so the hitch
+is delayed, not removed, unless the list is fed by measurement ahead of time.
+
+### Against the plan's success criteria on this GPU
+
+| criterion | result |
+|---|---|
+| worst frame at a switch p99 <= 25 ms (200 presets) | **not met**: 244 ms (new, 640x480), 249 ms (1080p); warm floor ~200 ms |
+| fade p99 <= 1.25x steady p99 | **not met**: 1.92x (640x480) and 1.91x (1080p); the governor steps down but its lever does not remove the heavy-fade cost |
+| >= 58 fps average | **not met overall** (56.4); **met on what the slow list plays**: pass 2 of the 40-preset run has p50 loads of 2.5 ms and 57.1 fps over the whole run |
+| no load blocks the render thread > 8 ms | **not met**: 165 of 200 loads are over 8 ms, p50 110 ms. The cost is inside projectM and cannot be moved off the thread through its API |
+| fade runs on the wall clock | met (WP4a, unchanged) |
+| tests, clippy, fmt | met (see the integration summary) |
+
+The best achievable result with the current engine is the two-pass row: with
+the slow list primed, automatic play switches in a median of 11 ms and holds
+57 fps, and the remaining hitches are first encounters. Removing them needs
+the second projectM instance, or a projectM change; both are outside this
+branch.
