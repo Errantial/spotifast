@@ -348,9 +348,11 @@ cpal = { git = "https://github.com/crmne/cpal", rev = "fcd8b6ebee9d822426fa8d683
 # which GitHub's windows-latest images no longer carry; the fork lets an
 # explicit CMAKE_GENERATOR win, and asks vcpkg for the target's architecture
 # so libprojectM links for Windows on ARM. Its libprojectM comes from
-# crmne/projectm's spotifast branch, which adds a length check on HLSL
-# identifiers. Drop each when upstream releases it.
-projectm-sys = { git = "https://github.com/crmne/projectm-rs", rev = "93852ff7299e5a63ed1315437593fc70915c0863" }
+# Errantial/projectm's wp7-shader-cache branch (see PROJECTM-FORK.md): the
+# crmne/projectm spotifast branch, which adds a length check on HLSL
+# identifiers, plus an on-disk cache for the HLSL-to-GLSL transpile of preset
+# shaders. Drop each when upstream releases it.
+projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "0b1e4efe009033edbb41e5b3b26c1af5f1c7e551" }
 # hyper-proxy2's unreleased rustls 0.23 update plus our upstream provider
 # compatibility fix. Drop this fork when a release includes both changes.
 hyper-proxy2 = { git = "https://github.com/crmne/hyper-proxy2", rev = "efca4811371ddae81c06be168de54194938d70b1" }

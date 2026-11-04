@@ -5070,7 +5070,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 [[package]]
 name = "projectm-sys"
 version = "1.2.3"
-source = "git+https://github.com/crmne/projectm-rs?rev=93852ff7299e5a63ed1315437593fc70915c0863#93852ff7299e5a63ed1315437593fc70915c0863"
+source = "git+https://github.com/Errantial/projectm-rs?rev=0b1e4efe009033edbb41e5b3b26c1af5f1c7e551#0b1e4efe009033edbb41e5b3b26c1af5f1c7e551"
 dependencies = [
  "bindgen 0.70.1",
  "cmake",
