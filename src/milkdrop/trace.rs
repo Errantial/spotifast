@@ -5,8 +5,13 @@
 //! a hitch. Part of it is the load itself (read, parse, translate) and part
 //! is the first draw of the new preset, where the driver compiles and links
 //! its shaders. This reports both, and the frames after them, on stderr when
-//! the child is started with `SPOTIFAST_MILKDROP_TRACE` set; with it unset
-//! the only cost is the cached check that reads it once.
+//! the child is started with `SPOTIFAST_MILKDROP_TRACE` set.
+//!
+//! The load is timed either way: the child's slow-preset list and its fade
+//! governor act on that number in ordinary sessions, where this report is
+//! off. With the variable unset the only cost is two clock reads on a switch
+//! and the cached check that reads it once; the per-frame clock below only
+//! runs when the report is on.
 //!
 //! The measurements are wall-clock times of the frame boundaries, which is
 //! what a person sees. A GPU's own timings would say where inside a frame
@@ -28,6 +33,12 @@ const FIRST: usize = 30;
 
 /// How many of the costliest switches the summary ranks.
 const SLOWEST: usize = 20;
+
+/// How many finished switches the summary keeps. A traced session runs for
+/// hours, so the list cannot grow without a bound; a thousand switches at ten
+/// seconds each is nearly three hours, and the top of the ranking is what the
+/// summary is for.
+const KEPT: usize = 1000;
 
 /// Whether the child was asked to report its frames. Read once, so a frame
 /// asks a cached `bool` rather than the environment.
@@ -183,6 +194,11 @@ impl Trace {
             worst_ms,
             first,
         });
+        // A traced session can run for hours; the oldest are dropped so the
+        // list cannot grow for the life of the child.
+        if self.switches.len() > KEPT {
+            self.switches.remove(0);
+        }
     }
 
     /// Writes what every switch added up to when the child leaves.
@@ -376,5 +392,20 @@ mod tests {
         assert_eq!(percentile(&values, 0.0), 1.0);
         assert_eq!(percentile(&values, 0.5), 3.0);
         assert_eq!(percentile(&values, 1.0), 100.0);
+    }
+
+    /// A long traced session cannot grow the list for the life of the child:
+    /// the oldest switch is dropped once the bound is reached.
+    #[test]
+    fn the_switch_list_is_bounded() {
+        let mut trace = traced();
+        let start = Instant::now();
+        for index in 0..KEPT + 5 {
+            trace.note_at(loaded(&format!("{index}.milk"), Duration::ZERO), start);
+            trace.finish();
+        }
+        assert_eq!(trace.switches.len(), KEPT);
+        assert_eq!(trace.switches[0].name, format!("{}.milk", 5));
+        assert_eq!(trace.switches[KEPT - 1].name, format!("{}.milk", KEPT + 4));
     }
 }

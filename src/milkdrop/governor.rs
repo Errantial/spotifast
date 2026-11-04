@@ -31,7 +31,8 @@ const HOLD: Duration = Duration::from_secs(2);
 /// Decides whether the picture is drawn at full detail or at [`DOWN`] while a
 /// preset fades in.
 pub(super) struct Governor {
-    /// How long the last frames took, oldest replaced as new ones arrive.
+    /// How long the last frames of the fade took, oldest replaced as new
+    /// ones arrive. Only frames of the fade in progress are in it.
     window: [Duration; WINDOW],
     at: usize,
     filled: usize,
@@ -41,6 +42,9 @@ pub(super) struct Governor {
     scale: u32,
     /// When the fade that took the detail away ended, while it is held.
     held: Option<Instant>,
+    /// Whether the last frame judged was inside a fade, so the window can
+    /// start afresh when a new one begins.
+    fading: bool,
 }
 
 impl Governor {
@@ -52,6 +56,7 @@ impl Governor {
             late: 0,
             scale: 1,
             held: None,
+            fading: false,
         }
     }
 
@@ -60,20 +65,22 @@ impl Governor {
         self.scale
     }
 
-    /// Whether the picture is at the detail the user asked for, rather than
-    /// at the smaller one a fade took. A switch cost measured below it is
-    /// cheaper than the switch a person would see, so it is not the number
-    /// the slow-preset budget may act on.
-    pub(super) fn full_detail(&self) -> bool {
-        self.scale == 1
+    /// Forgets every frame judged so far: each fade decides from its own
+    /// frames, never from what the preset before it cost.
+    fn restart(&mut self) {
+        self.window = [Duration::ZERO; WINDOW];
+        self.at = 0;
+        self.filled = 0;
+        self.late = 0;
     }
 
     /// One frame's cost, and whether a preset is fading in right now.
     ///
     /// A frame over the budget in a fade means the two presets did not fit;
-    /// [`LATE_FRAMES`] of them in a row means the whole fade will not, so the
-    /// picture gives up detail until it ends. Outside a fade the window is
-    /// kept up to date but nothing is decided.
+    /// [`LATE_FRAMES`] of them in the window means the whole fade will not,
+    /// so the picture gives up detail until it ends. Outside a fade nothing
+    /// is decided, and the window is emptied: a slow preset playing before a
+    /// fade must not make that fade look heavy on its first frame.
     ///
     /// A frame that paid for a preset switch is not a fade frame: its cost is
     /// the switch's, which is one long frame whether or not a fade runs, so
@@ -89,11 +96,43 @@ impl Governor {
         if budget.is_zero() {
             self.scale = 1;
             self.held = None;
+            self.fading = false;
+            self.restart();
             return;
         }
         if switched {
             return;
         }
+        if !fading {
+            // Deaf outside a fade: a slow preset on its own is the detail
+            // the user asked for, and the picture is never shrunk on their
+            // behalf.
+            if self.fading {
+                self.fading = false;
+                self.restart();
+            }
+            if self.scale > 1 {
+                match self.held {
+                    // The smaller picture is held for a while after the fade,
+                    // then the detail comes back: keeping it would be a silent
+                    // change of the quality the user chose for one slow fade.
+                    Some(since) if now.saturating_duration_since(since) >= HOLD => {
+                        self.scale = 1;
+                        self.held = None;
+                    }
+                    Some(_) => {}
+                    None => self.held = Some(now),
+                }
+            }
+            return;
+        }
+        if !self.fading {
+            // A new fade begins: its frames are the only ones that judge it.
+            self.fading = true;
+            self.restart();
+        }
+        // A fade decides for itself; a hold from an earlier one is over.
+        self.held = None;
         if self.filled == WINDOW {
             self.late -= usize::from(self.window[self.at] > budget);
         } else {
@@ -103,24 +142,8 @@ impl Governor {
         self.late += usize::from(frame > budget);
         self.at = (self.at + 1) % WINDOW;
 
-        if fading {
-            // A fade decides for itself; a hold from an earlier one is over.
-            self.held = None;
-            if self.scale == 1 && self.filled == WINDOW && self.late >= LATE_FRAMES {
-                self.scale = DOWN;
-            }
-        } else if self.scale > 1 {
-            match self.held {
-                // The smaller picture is held for a while after the fade,
-                // then the detail comes back: keeping it would be a silent
-                // change of the quality the user chose for one slow fade.
-                Some(since) if now.saturating_duration_since(since) >= HOLD => {
-                    self.scale = 1;
-                    self.held = None;
-                }
-                Some(_) => {}
-                None => self.held = Some(now),
-            }
+        if self.scale == 1 && self.filled == WINDOW && self.late >= LATE_FRAMES {
+            self.scale = DOWN;
         }
     }
 }
@@ -294,25 +317,72 @@ mod tests {
         assert_eq!(governor.scale(), DOWN, "a heavy fade is still seen");
     }
 
-    /// While the step down is held, a switch is drawn at a quarter of the
-    /// work, so its cost must not be taken as what the switch costs.
+    /// While the step down is held, the picture is smaller than the user
+    /// asked for, so a switch drawn then is not the switch they would see.
+    /// Full detail comes back after the hold.
     #[test]
-    fn a_held_step_down_is_not_full_detail() {
+    fn a_held_step_down_is_still_a_step_down() {
         let mut governor = Governor::new();
         let base = Instant::now();
-        assert!(governor.full_detail(), "full detail to begin with");
+        assert_eq!(governor.scale(), 1, "full detail to begin with");
         for index in 0..WINDOW as u32 {
             observe_frame(&mut governor, base, index, BUDGET * 3, true);
         }
         assert_eq!(governor.scale(), DOWN);
-        assert!(
-            !governor.full_detail(),
-            "a switch here is drawn small, not as a person sees it"
-        );
 
         governor.observe(base + BUDGET * 20, BUDGET / 2, false, false, BUDGET);
-        assert!(!governor.full_detail(), "still held after the fade");
+        assert_eq!(governor.scale(), DOWN, "still held after the fade");
         governor.observe(base + BUDGET * 20 + HOLD, BUDGET / 2, false, false, BUDGET);
-        assert!(governor.full_detail(), "and full detail is back");
+        assert_eq!(governor.scale(), 1, "and full detail is back");
+    }
+
+    /// A slow preset playing before a fade must not make that fade look
+    /// heavy: the window holds only frames of the fade in progress, so its
+    /// first frames cannot finish a verdict the last preset started.
+    #[test]
+    fn a_slow_preset_before_a_fade_does_not_step_it_down() {
+        let mut governor = Governor::new();
+        let base = Instant::now();
+        // A preset that never keeps up, playing outside any fade.
+        for index in 0..200 {
+            observe_frame(&mut governor, base, index, BUDGET * 5, false);
+        }
+        assert_eq!(governor.scale(), 1, "a slow preset is left alone");
+
+        // The fade itself keeps up: its first frame must not inherit the
+        // heavy window the preset before filled.
+        observe_frame(&mut governor, base, 200, BUDGET / 2, true);
+        assert_eq!(
+            governor.scale(),
+            1,
+            "the fade's first frame judged the preset before it"
+        );
+
+        // And the fade's own slow frames still decide, once enough of them
+        // are in the window.
+        for index in 201..201 + WINDOW as u32 {
+            observe_frame(&mut governor, base, index, BUDGET * 3, true);
+        }
+        assert_eq!(governor.scale(), DOWN, "the fade's own cost is seen");
+    }
+
+    /// A new fade decides from its own frames: the window of the one before
+    /// does not carry over and step the picture down early.
+    #[test]
+    fn each_fade_starts_its_window_afresh() {
+        let mut governor = Governor::new();
+        let base = Instant::now();
+        for index in 0..WINDOW as u32 {
+            observe_frame(&mut governor, base, index, BUDGET * 3, true);
+        }
+        assert_eq!(governor.scale(), DOWN);
+        // The fade ends and the hold runs out.
+        governor.observe(base + BUDGET * 30, BUDGET / 2, false, false, BUDGET);
+        governor.observe(base + BUDGET * 30 + HOLD, BUDGET / 2, false, false, BUDGET);
+        assert_eq!(governor.scale(), 1);
+
+        // The next fade is cheap: one frame into it, no verdict yet.
+        observe_frame(&mut governor, base, 400, BUDGET / 2, true);
+        assert_eq!(governor.scale(), 1, "the last fade's window came along");
     }
 }

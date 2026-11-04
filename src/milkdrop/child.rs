@@ -38,6 +38,15 @@ use super::{DEFAULT_FPS, DEFAULT_SECONDS, LAG, MIN_SIZE, Presets, Request};
 /// together: a quarter of the width and height, which is already a mosaic.
 const MAX_SCALE: u32 = 4;
 
+/// Whether a switch drawn at `drawn` says what switching to that preset
+/// costs the user. `user` is the detail their own setting asks for; when the
+/// governor's step down cannot shrink the picture any further (they already
+/// chose the smallest one), the switch is drawn exactly as they would see it
+/// and its cost is worth recording.
+fn records_switch(user: u32, drawn: u32) -> bool {
+    drawn == user
+}
+
 /// What the child is told to do, on stdin, as one JSON object per line.
 #[derive(Debug, Default, Deserialize)]
 struct Control {
@@ -389,9 +398,13 @@ impl Child {
         // governor is given the frame.
         let fading = self.presets.fading(started);
         let budget = self.frame_budget();
-        // The fade governor's own step down, on top of the user's setting.
-        let detail = self.quality.scale();
-        let scale = self.scale.max(1).saturating_mul(detail).min(MAX_SCALE);
+        // The user's own setting, and the fade governor's step down on top
+        // of it. The step is a divisor, so the second is never a bigger
+        // picture than the first.
+        let user_scale = self.scale.clamp(1, MAX_SCALE);
+        let scale = user_scale
+            .saturating_mul(self.quality.scale())
+            .min(MAX_SCALE);
         let Some(live) = &mut self.live else {
             return;
         };
@@ -418,7 +431,9 @@ impl Child {
             // what switching to this preset costs: while a fade holds the
             // governor's step down, the first draw is a quarter of the work,
             // and the budget would trust a slow preset on the strength of it.
-            if self.quality.full_detail() {
+            // At the user's own lowest detail the step down changes nothing,
+            // and a switch there is exactly what a person sees.
+            if records_switch(user_scale, scale) {
                 self.presets
                     .record_switch(&loaded.path, loaded.switch_cost());
             }
@@ -1016,12 +1031,45 @@ fn frames_per_second(drawn: &[Instant]) -> f32 {
     (drawn.len() - 1) as f32 / span.as_secs_f32()
 }
 
+/// What [`prepare_frame`] asks of the engine, so a test can stand in for it
+/// without a window or a GL context.
+pub(super) trait Loads {
+    fn set_seconds(&mut self, seconds: u32);
+    fn load_data(&mut self, path: &std::path::Path, data: Vec<u8>, smooth: bool) -> bool;
+    fn load(&mut self, path: &std::path::Path, smooth: bool);
+    fn feed_frames(&mut self, frames: &[[f32; 2]]);
+}
+
+impl Loads for Engine {
+    fn set_seconds(&mut self, seconds: u32) {
+        Engine::set_seconds(self, seconds);
+    }
+
+    fn load_data(&mut self, path: &std::path::Path, data: Vec<u8>, smooth: bool) -> bool {
+        Engine::load_data(self, path, data, smooth)
+    }
+
+    fn load(&mut self, path: &std::path::Path, smooth: bool) {
+        Engine::load(self, path, smooth);
+    }
+
+    fn feed_frames(&mut self, frames: &[[f32; 2]]) {
+        Engine::feed_frames(self, frames);
+    }
+}
+
 /// What every frame does before drawing, window or not: moves through the
 /// presets and hands the engine the sound since the last frame. Done each
 /// frame, so a finished listing is picked up without a wake. Returns the
 /// preset it loaded, and how long that took, when one was due.
+///
+/// The load is timed on every switch. Two clock reads are cheaper than a
+/// wrong picture: the slow-preset list and the fade governor both judge this
+/// frame by its cost, and they run in ordinary sessions, where the trace's
+/// report is switched off. [`trace`] only decides whether the numbers are
+/// printed.
 pub(super) fn prepare_frame(
-    engine: &mut Engine,
+    engine: &mut impl Loads,
     presets: &mut Presets,
     folder: &std::path::Path,
     seconds: u32,
@@ -1037,9 +1085,7 @@ pub(super) fn prepare_frame(
     engine.set_seconds(seconds);
     let loaded = match presets.take_request() {
         Some(Request::Load { path, smooth }) => {
-            // Timed only when the environment asks for it, so an ordinary
-            // load pays two clock reads and nothing else.
-            let started = trace::enabled().then(Instant::now);
+            let started = Instant::now();
             // The file is read ahead, so a switch only parses it and
             // compiles its shaders. A miss reads the file here, as it
             // always did.
@@ -1051,7 +1097,7 @@ pub(super) fn prepare_frame(
                 }
                 None => engine.load(&path, smooth),
             }
-            started.map(|started| trace::Loaded {
+            Some(trace::Loaded {
                 path,
                 smooth,
                 took: started.elapsed(),
@@ -1350,6 +1396,93 @@ mod tests {
         assert!(
             (fps - 50.0).abs() < 0.001,
             "twenty milliseconds a frame is fifty a second, not {fps}"
+        );
+    }
+
+    /// A switch is worth recording unless the fade governor's step down drew
+    /// the picture smaller than the user asked for. At the user's own lowest
+    /// detail the step changes nothing, and the switch is exactly what they
+    /// would see.
+    #[test]
+    fn a_switch_is_recorded_unless_the_picture_was_smaller() {
+        assert!(records_switch(1, 1), "the setting's own detail");
+        assert!(
+            records_switch(4, 4),
+            "the user already chose the smallest picture"
+        );
+        assert!(!records_switch(1, 2), "a fade drew it at half size");
+        assert!(!records_switch(3, 4), "the step went past the user's scale");
+    }
+
+    /// An engine that only counts what it is asked to do, so the frame's
+    /// switching work can be tested without a window or a GL context.
+    struct SlowLoad {
+        loads: usize,
+    }
+
+    impl Loads for SlowLoad {
+        fn set_seconds(&mut self, _seconds: u32) {}
+
+        fn load_data(&mut self, _path: &std::path::Path, _data: Vec<u8>, _smooth: bool) -> bool {
+            // A miss, so the fallback that reads the file is what pays.
+            false
+        }
+
+        fn load(&mut self, _path: &std::path::Path, _smooth: bool) {
+            self.loads += 1;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        fn feed_frames(&mut self, _frames: &[[f32; 2]]) {}
+    }
+
+    /// The frame that loads a preset is timed even with the trace switched
+    /// off: the slow-preset list and the fade governor read that number in
+    /// ordinary sessions. Gating the clock reads on the trace used to leave
+    /// both of them inert, and no test saw it because each was only tested
+    /// on its own.
+    #[test]
+    fn a_load_is_timed_with_the_trace_switched_off() {
+        let dir = std::env::temp_dir().join(format!(
+            "spotifast-milkdrop-load-timing-{}-{}",
+            std::process::id(),
+            NEXT_RING.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("a place for the test's preset");
+        let preset = dir.join("a.milk");
+        std::fs::write(&preset, b"[preset00]\n").expect("a preset to load");
+        let ring = Ring::create(&dir.join("ring")).expect("a ring to read");
+
+        let mut presets = Presets::new();
+        presets.files = vec![preset.clone()];
+        presets.next(true);
+        let mut prefetch = Prefetch::start();
+        let mut engine = SlowLoad { loads: 0 };
+        let mut cursor = 0;
+        let loaded = prepare_frame(
+            &mut engine,
+            &mut presets,
+            &dir,
+            10,
+            &ring,
+            &mut cursor,
+            &mut prefetch,
+        )
+        .expect("a load is reported to the frame's own rules");
+        drop(prefetch);
+        std::fs::remove_dir_all(&dir).expect("the test's files");
+
+        assert_eq!(engine.loads, 1, "the preset was loaded once");
+        assert_eq!(loaded.path, preset);
+        assert!(
+            loaded.took >= Duration::from_millis(4),
+            "the load was not timed: {:?}",
+            loaded.took
+        );
+        assert_eq!(
+            loaded.switch_cost(),
+            loaded.took,
+            "no first draw is known before the caller draws"
         );
     }
 }
