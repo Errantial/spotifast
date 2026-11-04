@@ -740,3 +740,78 @@ the slow list primed, automatic play switches in a median of 11 ms and holds
 57 fps, and the remaining hitches are first encounters. Removing them needs
 the second projectM instance, or a projectM change; both are outside this
 branch.
+
+## WP7: the HLSL transpile cache (RTX 3080 Laptop, 2026-11-04)
+
+Branch `wp7-transpile-cache`. The transpile is now cached on disk, so a preset
+that has been seen before skips libprojectM's HLSL preprocessor and parser.
+`TRANSPILE-CACHE.md` is the full write-up: the cache key, the storage, the
+configuration and the per-phase numbers. `PROJECTM-FORK.md` records the fork
+chain that carries the change, which is the only way to get it without a
+`projectM` release.
+
+Where the time went: the warm load's 85 to 135 ms was 30 to 56 ms of HLSL
+preprocessing and 5 to 20 ms of HLSL parsing *per shader*, while the driver
+compiled the result in 0.7 to 2.7 ms. The generated GLSL is a pure function of
+the preprocessed source and a handful of declarations, so it is stored per
+shader and reused; a hit reads the file and goes straight to
+`glCompileShader`.
+
+Same protocol as WP6: 200 presets, 3 s each, 640x480, `--path new`, five runs
+one after another, nothing else drawing.
+
+| metric, 200 presets | cache off | cold | warm | warm again |
+|---|---:|---:|---:|---:|
+| preset load p50 / p99 / max (ms) | 127.6 / 402.7 / 849.1 | 115.6 / 254.5 / 361.5 | **5.1 / 111.6 / 155.7** | **5.2 / 120.4 / 319.7** |
+| loads over 8 ms | 170 | 160 | 54 | 47 |
+| first draw p50 / p99 (ms) | 5.2 / 37.7 | 5.5 / 29.1 | 4.8 / 31.9 | 4.9 / 34.5 |
+| switch cost p50 / p99 (ms) | 135.1 / 427.8 | 122.1 / 276.6 | **11.3 / 115.7** | **11.0 / 126.8** |
+| worst frame per switch p50 / p99 (ms) | 151.4 / 438.9 | 137.9 / 318.0 | **26.5 / 159.0** | **25.8 / 162.9** |
+| fade frame p50 / p99 (ms) | 16.7 / 42.9 | 16.7 / 43.8 | 16.7 / 39.6 | 16.7 / 40.0 |
+| steady frame p50 / p99 (ms) | 16.6 / 23.4 | 16.7 / 33.6 | 16.7 / 21.6 | 16.7 / 29.9 |
+| fade p99 / steady p99 | 1.83x | 1.30x | 1.83x | 1.34x |
+| frame rate | 53.3 fps | 53.9 fps | **57.1 fps** | **56.9 fps** |
+| all 200 loads together | 26.5 s | 21.2 s | **2.35 s** | **2.56 s** |
+| hit rate | - | 15.0% | 98.1% | 98.1% |
+
+Per shader, median: miss 65.0 ms (preprocess 49.4, parse 13.8, generate 0.5,
+strip 0.02) against a hit's 0.34 ms read and 0.8 ms driver compile. Over a run,
+265 transpiles of 18.6 s became 313 reads of 0.31 s. 200 presets take 267
+entries, 1.8 MB, 6.8 KB each. `PROJECTM_SHADER_CACHE_VERIFY=1` re-transpiled
+all 313 hits and found 0 mismatches across processes.
+
+Run to run, the warm load median was 5.1 to 7.2 ms, and one run taken right
+after the cache directory had been rewritten read its entries at 6.6 ms each
+instead of 0.3 and showed a 19.7 ms median: that is the file system, not the
+code, and `TRANSPILE-CACHE.md` has the four runs side by side. The p99 does
+not depend on the disk: it is the six shaders the driver rejects, below.
+
+Against the plan's criteria on this GPU:
+
+| criterion | result |
+|---|---|
+| worst frame at a switch p99 <= 25 ms | **not met**: 159.0 ms (warm), p50 26.5 ms is at the target. The harness counts the frame's wait for its own deadline (16.7 ms), and 10 of 200 presets cost 50 to 156 ms for reasons below |
+| fade p99 <= 1.25x steady p99 | **not met**: 1.34x to 1.83x, unchanged by the cache: a fade draws two presets |
+| >= 58 fps average | **not met**: 57.1 fps, from 53.3 |
+| no load over 8 ms | **not met**: 54 of 200, p50 5.1 ms. 146 loads are under 8 ms, against 30 before |
+| load p50 <= 8 ms | **met**: 5.1 ms |
+| preset switch no longer the hitch | **met**: p50 135 -> 11 ms, p99 428 -> 116 ms |
+
+What is left is not the transpile:
+
+- 6 of the 265 distinct shader sources transpile and then fail to compile in
+  the driver. projectM logs an error and drops the shader, and because only
+  successful transpiles are cached they are transpiled again on every load:
+  about 15 ms of transpile plus a failed driver compile of 30 to 60 ms each
+  time. That is the difference between a 3 ms load and a 100 ms one in the
+  10-preset sample in `TRANSPILE-CACHE.md`.
+- The other 194 presets load in a median of 5.1 ms, which is the preset's own
+  setup (text, expressions, textures, framebuffers, measured at 0.0 to 3 ms
+  per step) plus GL calls that wait when the queue is full.
+- The fade ratio is fill and geometry.
+
+The cache is on by default, uses `%LOCALAPPDATA%\projectm\shader-cache`
+(`$XDG_CACHE_HOME` or `~/.cache` elsewhere), and needs no Spotifast change.
+`PROJECTM_SHADER_CACHE=0` turns it off, `PROJECTM_SHADER_CACHE_DIR` moves it,
+`PROJECTM_SHADER_CACHE_VERIFY=1` and `PROJECTM_SHADER_CACHE_DEBUG=1` are for
+testing it.
