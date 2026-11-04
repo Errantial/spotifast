@@ -896,5 +896,6 @@ Against the criteria on this GPU:
 The slow list now excludes 1 of 200 presets with a warm cache. With a cold
 cache it still learns from the uncached first switch: in a two-pass run, pass
 1 put 32 of 40 presets on it, and pass 2 cycled 10 presets although every
-load took under 7 ms. That is a WP6 policy question, left for the
-maintainer (`TRANSPILE-CACHE.md`, "The slow list").
+load took under 7 ms. WP10 changed that: a preset needs two switches over
+50 ms in the session to be kept out of automatic play (`TRANSPILE-CACHE.md`,
+"The slow list").

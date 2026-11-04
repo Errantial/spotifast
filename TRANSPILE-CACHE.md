@@ -526,9 +526,12 @@ switch would cost about 10 ms. The next session starts with an empty list
 and a cache that is warm for what was seen, so this only lasts until the
 window closes, and on a large
 folder automatic play rarely comes back to a preset in one session anyway. On
-a small folder it is visible. A possible change, for the maintainer to decide
-(it changes WP6's policy): exclude a preset only after its second slow switch,
-which a warm cache answers in about 10 ms for all but one preset of the 200.
+a small folder it is visible. WP10 changed WP6's policy as a result: a preset is
+kept out of automatic play only after its second switch over 50 ms in the
+session (`budget.rs`). A cold first switch alone no longer excludes, and a
+warm cache answers the second in about 10 ms for all but one preset of the
+200. A cheap switch between two slow ones does not reset the count. Not yet
+measured on a real GPU: the cold two-pass run above, repeated with this change.
 
 ### Scaling: the whole library
 
