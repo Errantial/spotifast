@@ -19,17 +19,20 @@ already seen, and skipping it is what the fork's cache does
 
 | link | repository | branch | commit | holds |
 |---|---|---|---|---|
-| 1 | [Errantial/projectm](https://github.com/Errantial/projectm) (fork of crmne/projectm) | `wp7-shader-cache` | `05178a4f9` | `crmne/projectm` `spotifast` plus the preset shader transpile cache |
-| 2 | [Errantial/projectm-rs](https://github.com/Errantial/projectm-rs) (fork of crmne/projectm-rs) | `wp7-shader-cache` | `8ad31cf` | `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`) with `projectm-sys/libprojectM` pointed at link 1 |
-| 3 | `Errantial/spotifast` | `wp7-transpile-cache` | see `git log` | `Cargo.toml` pins `projectm-sys` to link 2 |
+| 1 | [Errantial/projectm](https://github.com/Errantial/projectm) (fork of crmne/projectm) | `wp8-stutter-fixes` | `d3d81668e` | `crmne/projectm` `spotifast` plus the preset shader transpile cache and the WP8 stutter fixes |
+| 2 | [Errantial/projectm-rs](https://github.com/Errantial/projectm-rs) (fork of crmne/projectm-rs) | `wp8-stutter-fixes` | `ea2d84e` | `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`) with `projectm-sys/libprojectM` pointed at link 1 |
+| 3 | `Errantial/spotifast` | `wp8-stutter-fixes` | see `git log` | `Cargo.toml` pins `projectm-sys` to link 2 |
+
+The `wp7-shader-cache` branches (link 1 `05178a4f9`, link 2 `8ad31cf`) are
+unchanged; `wp8-stutter-fixes` starts from them.
 
 `Cargo.toml`'s `[patch]` section is what ties Spotifast to the chain:
 
 ```toml
-projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "8ad31cf7f4d1f6a0c4e89b8431444505246b368e" }
+projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "ea2d84ec529302f20e6cd456e162f894efe8c3df" }
 ```
 
-Link 1 carries three commits on the `spotifast` branch:
+Link 1 carries three WP7 commits on the `spotifast` branch:
 
 | commit | what |
 |---|---|
@@ -37,33 +40,52 @@ Link 1 carries three commits on the `spotifast` branch:
 | `7bb27c4e5` | keep the cache lock over the whole write, create the directory with one call, read the debug switches before the disable switch |
 | `05178a4f9` | log why the cache is disabled, and label the per-hit timing for the driver compile only |
 
-Link 2 carries three commits: `0b1e4ef` (the submodule change), `ba70411`
-(pointer to `7bb27c4e5`) and `8ad31cf` (pointer to `05178a4f9`).
+and five WP8 commits on top of them:
+
+| commit | what |
+|---|---|
+| `3a4cdd4d2` | every cache write, mtime refresh, scan and prune on one background thread per process; a 256 MiB byte budget pruned least recently used first; the prune at start; reject entries in the store |
+| `b076327f7` | `MilkdropShader` skips a shader this driver rejected before, straight to the caller's fallback |
+| `68a95d7dc` | `tests/libprojectM/ShaderTranspileCacheTest.cpp`: the queue, reject entries, damaged entries and the LRU prune, with no GL context |
+| `63a7ba68b` | the writer thread reads each new entry back once, so the antivirus scan of a new file is not paid by the render thread |
+| `d3d81668e` | `TextureManager` rescans the texture folders in the background between preset loads instead of on the render thread at every load |
+
+Link 2 carries four commits: `0b1e4ef` (the submodule change), `ba70411`
+(pointer to `7bb27c4e5`), `8ad31cf` (pointer to `05178a4f9`) and, on
+`wp8-stutter-fixes`, `ea2d84e` (pointer to `d3d81668e`, and `.gitmodules`
+following that branch).
 
 ### What link 1 adds on top of the `spotifast` branch
 
 `crmne/projectm`'s `spotifast` branch (`ffb109857`) is upstream `master` plus
 a length check on HLSL identifiers, kept until projectM releases it. On top of
-that, `wp7-shader-cache` adds:
+that, `wp8-stutter-fixes` adds (the cache itself is WP7's; WP8 changed it and added the rest):
 
 - `src/libprojectM/MilkdropPreset/ShaderTranspileCache.{hpp,cpp}`: the
-  persistent cache, its SHA-256 key and its bounded, atomically written
-  directory.
+  persistent cache, its SHA-256 key, its reject entries and its bounded,
+  atomically written directory, all written by a background thread.
 - `src/libprojectM/MilkdropPreset/MilkdropShader.cpp`: the transpile is split
   into a function that takes the declaration block and the preprocessed
   source and returns GLSL, so the result can be looked up and stored; the
   declaration block is built before the transpile so it can be part of the
-  key; and `PROJECTM_SHADER_CACHE_DEBUG=1` reports the per-phase split.
+  key; `PROJECTM_SHADER_CACHE_DEBUG=1` reports the per-phase split; and a
+  shader with a reject entry for this driver throws the usual
+  `ShaderException` before it is transpiled.
 - `src/libprojectM/Renderer/Shader.{hpp,cpp}`: `Shader::Reset()`, so a cached
   GLSL that fails to compile can be retried on a clean program object.
 - `src/libprojectM/MilkdropPreset/CMakeLists.txt`: the new sources, and
   `cxx_std_17` for this target only (the cache uses `std::filesystem`; the
   rest of libprojectM stays on C++14).
+- `src/libprojectM/Renderer/TextureManager.{hpp,cpp}`: the texture file list
+  survives a preset load and is refreshed by a background scan (`std::async`)
+  started at the previous load.
+- `tests/libprojectM/ShaderTranspileCacheTest.cpp` and its line in
+  `tests/libprojectM/CMakeLists.txt`: GoogleTest tests of the cache.
 
 ### What link 2 adds
 
 Only the submodule: `.gitmodules` points at `Errantial/projectm` on
-`wp7-shader-cache`, and the recorded gitlink is link 1's commit. Its own base
+`wp8-stutter-fixes`, and the recorded gitlink is link 1's commit. Its own base
 is `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`), which Spotifast
 needed before this branch for the CMake generator and the vcpkg triplet the
 `projectm-sys` build script chooses.
@@ -72,12 +94,12 @@ needed before this branch for the CMake generator and the vcpkg triplet the
 
 Always work from the oldest link up, and never rewrite a published commit.
 
-1. In a checkout of `Errantial/projectm` on `wp7-shader-cache`, make the
+1. In a checkout of `Errantial/projectm` on `wp8-stutter-fixes`, make the
    libprojectM change, build it through Spotifast, commit and push.
-2. In a checkout of `Errantial/projectm-rs` on `wp7-shader-cache`:
+2. In a checkout of `Errantial/projectm-rs` on `wp8-stutter-fixes`:
 
    ```sh
-   git -C projectm-sys/libprojectM fetch origin wp7-shader-cache
+   git -C projectm-sys/libprojectM fetch origin wp8-stutter-fixes
    git -C projectm-sys/libprojectM checkout <new projectm commit>
    git add projectm-sys/libprojectM && git commit && git push
    ```
@@ -99,6 +121,10 @@ edits to a git dependency's C++ sources and will not rebuild them otherwise.
 per preset shader, and `PROJECTM_SHADER_CACHE_VERIFY=1` transpiles every hit
 again and prints `VERIFY MISMATCH` if the cached source differs. Both are off
 by default. `TRANSPILE-CACHE.md` records what they showed on this laptop.
+The cache's own tests (`ShaderTranspileCacheTest.cpp`) build in libprojectM's
+`projectM-unittest` target when `BUILD_TESTING=ON`; `projectm-sys` builds with
+it off, so on this laptop they were built and run on their own against
+vcpkg's GoogleTest (`TRANSPILE-CACHE.md`, "Checks").
 
 ## Dropping it
 

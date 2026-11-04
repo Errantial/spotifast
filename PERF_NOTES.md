@@ -815,3 +815,86 @@ The cache is on by default, uses `%LOCALAPPDATA%\projectm\shader-cache`
 `PROJECTM_SHADER_CACHE=0` turns it off, `PROJECTM_SHADER_CACHE_DIR` moves it,
 `PROJECTM_SHADER_CACHE_VERIFY=1` and `PROJECTM_SHADER_CACHE_DEBUG=1` are for
 testing it.
+
+## WP8: the cache review fixes and the rest of a switch (RTX 3080 Laptop, 2026-11-04)
+
+Branch `wp8-stutter-fixes`, `projectm-sys` pinned to Errantial/projectm-rs
+`ea2d84e` (libprojectM Errantial/projectm `d3d81668e`). `TRANSPILE-CACHE.md`
+is the full write-up, with the protocol, the per-phase split, the scaling
+test and the robustness runs; `PROJECTM-FORK.md` lists the fork commits.
+
+What changed:
+
+- **The cache's disk work left the render thread.** One worker thread per
+  process writes entries (temporary file and rename), reads each back once,
+  refreshes the mtime of entries that were hit, scans at start and prunes.
+  The render thread reads one file per shader and queues the rest.
+- **A 256 MiB byte budget, least recently used first**, instead of 4096
+  entries pruned by write time. The full 10,184-preset library takes 5,104
+  entries and 35.1 MB (6,886 bytes an entry), so the budget holds about
+  39,000 entries, 7.6 times the library. A second pass over the whole library
+  in a new process transpiled nothing.
+- **Reject entries**: a shader this driver refused (6 in the 200-preset
+  sample, 179 of 5,104 distinct shaders in the library) is skipped straight
+  to the usual fallback next time, keyed on the GL vendor, renderer and
+  version strings. Those six presets load in 3.4 to 7.7 ms instead of 160 to
+  218 ms.
+- **The antivirus scan of a new entry** (about 7 ms on the first open of a
+  new file here) is now paid by the worker's read-back, not by the render
+  thread's first hit. Cache reads went from p99 24 ms to 0.9 ms per load.
+- **Texture folder rescans** moved to the background. libprojectM threw its
+  texture file list away at every preset load and rescanned every search
+  path, including the 10,184-file preset folder Spotifast passes, on the
+  render thread: p99 20 ms per load. Now one scan per process, then
+  background scans between loads.
+- **The governor** no longer counts the frame after a switch as a late fade
+  frame (`src/milkdrop/policy.rs`, two new tests).
+
+Same protocol as WP6 and WP7, 200 presets, 3 s each, 640x480, `--path new`,
+each run after the machine's CPU stayed under 20% (13 to 16% measured):
+
+| metric, 200 presets | off | cold | warm | warm again | WP7 warm |
+|---|---:|---:|---:|---:|---:|
+| preset load p50 / p99 / max (ms) | 138.1 / 226.9 / 280.8 | 118.3 / 238.5 / 262.4 | **4.9 / 17.6 / 35.6** | **4.9 / 22.4 / 37.7** | 5.1 / 111.6 / 155.7 |
+| loads over 8 ms / over 25 ms | 165 / 165 | 158 / 158 | **11 / 2** | **14 / 2** | 54 / 16 |
+| switch cost p50 / p99 (ms) | 147.1 / 240.2 | 123.6 / 243.6 | **10.0 / 40.9** | **9.9 / 40.3** | 11.3 / 115.7 |
+| switches over 50 ms (slow list) | 165 | 158 | **1** | **1** | about 10 |
+| switch frame p50 / p99 (ms) | 160.1 / 255.2 | 138.8 / 260.1 | 24.6 / 55.9 | 24.6 / 56.1 | 25.1 / 131.4 |
+| worst frame per switch p50 / p99 (ms) | 160.1 / 283.2 | 141.6 / 260.1 | 25.0 / 63.2 | 25.0 / 70.2 | 26.5 / 159.0 |
+| fade frame p50 / p99 (ms) | 16.7 / 35.5 | 16.7 / 35.5 | 16.7 / 35.3 | 16.7 / 35.1 | 16.7 / 39.6 |
+| steady frame p50 / p99 (ms) | 16.6 / 18.2 | 16.7 / 18.2 | 16.6 / 18.1 | 16.7 / 18.5 | 16.7 / 21.6 |
+| fade p99 / steady p99 | 1.95x | 1.94x | 1.95x | 1.90x | 1.83x |
+| frame rate | 56.1 fps | 56.6 fps | **58.7 fps** | **58.7 fps** | 57.1 fps |
+| all 200 loads together | 24.3 s | 21.0 s | **1.05 s** | **1.08 s** | 2.35 s |
+
+Verify mode: 313 hits re-transpiled and 6 reject entries re-checked, 0 and 0
+mismatches.
+
+Where a warm load goes now (diagnostic timers, not committed): driver compile
+and link 1.4 ms at the median and 3.7 at the p99 for both programs, ns-eel
+compile and init code 0.6 and 11.3 ms (27.6 ms at worst), cache reads 0.5 and
+0.9 ms, textures 0 apart from one 14.7 ms scan per process, no transpile.
+
+The fade: during a fade the incoming and the outgoing preset's
+`RenderFrame` cost what each costs on its own (the outgoing one 13.9 ms
+against 14.0 before the fade, for example), and the transition draw 0.04 ms.
+The fade's p99 of 35 ms is two heavy presets' CPU work added together; there
+is no redundant work to remove without changing the picture, so WP8 does not
+change it.
+
+Against the criteria on this GPU:
+
+| criterion | result |
+|---|---|
+| worst frame at a switch p99 <= 25 ms | **not met**: 63.2 / 70.2 ms over the whole turn, 55.9 / 56.1 ms for the switch frame itself; p50 25.0 ms. Bounded by the fade (two presets' CPU) and the first draw, which is a fade frame |
+| fade p99 <= 1.25x steady p99 | **not met**: 1.90x to 1.95x; the transition costs 0.04 ms, the rest is two presets' per-frame CPU |
+| >= 58 fps | **met**: 58.7 fps in both warm runs (WP7 57.1) |
+| no load blocking the render thread > 8 ms | **not met**: 11 and 14 of 200 (WP7 54 and 47), p99 17.6 / 22.4 ms, all ns-eel compile, driver compile, the first texture scan and the initial-image draw; none is cache work |
+| no render-thread prune stalls | **met**: no scan or prune runs there; worst render-thread cache read 0.80 ms while the worker pruned 1,488 entries in 14 scans |
+| verify, 0 mismatches | **met** |
+
+The slow list now excludes 1 of 200 presets with a warm cache. With a cold
+cache it still learns from the uncached first switch: in a two-pass run, pass
+1 put 32 of 40 presets on it, and pass 2 cycled 10 presets although every
+load took under 7 ms. That is a WP6 policy question, left for the
+maintainer (`TRANSPILE-CACHE.md`, "The slow list").
