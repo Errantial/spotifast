@@ -19,17 +19,18 @@ already seen, and skipping it is what the fork's cache does
 
 | link | repository | branch | commit | holds |
 |---|---|---|---|---|
-| 1 | [Errantial/projectm](https://github.com/Errantial/projectm) (fork of crmne/projectm) | `wp8-stutter-fixes` | `d3d81668e` | `crmne/projectm` `spotifast` plus the preset shader transpile cache and the WP8 stutter fixes |
-| 2 | [Errantial/projectm-rs](https://github.com/Errantial/projectm-rs) (fork of crmne/projectm-rs) | `wp8-stutter-fixes` | `ea2d84e` | `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`) with `projectm-sys/libprojectM` pointed at link 1 |
-| 3 | `Errantial/spotifast` | `wp8-stutter-fixes` | see `git log` | `Cargo.toml` pins `projectm-sys` to link 2 |
+| 1 | [Errantial/projectm](https://github.com/Errantial/projectm) (fork of crmne/projectm) | `wp11-reject-expiry` | `8d8daf1f1` | `crmne/projectm` `spotifast` plus the preset shader transpile cache, the WP8 stutter fixes and the 7-day reject entry expiry |
+| 2 | [Errantial/projectm-rs](https://github.com/Errantial/projectm-rs) (fork of crmne/projectm-rs) | `wp11-reject-expiry` | `4a3d3b1` | `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`) with `projectm-sys/libprojectM` pointed at link 1 |
+| 3 | `Errantial/spotifast` | `wp11-reject-expiry-depcheck` | see `git log` | `Cargo.toml` pins `projectm-sys` to link 2 |
 
 The `wp7-shader-cache` branches (link 1 `05178a4f9`, link 2 `8ad31cf`) are
-unchanged; `wp8-stutter-fixes` starts from them.
+unchanged; `wp8-stutter-fixes` (link 1 `d3d81668e`, link 2 `ea2d84e`) starts
+from them and is unchanged too; `wp11-reject-expiry` starts from it.
 
 `Cargo.toml`'s `[patch]` section is what ties Spotifast to the chain:
 
 ```toml
-projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "ea2d84ec529302f20e6cd456e162f894efe8c3df" }
+projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "4a3d3b1379d02e8365c23598cdb4700acac45ea0" }
 ```
 
 Link 1 carries three WP7 commits on the `spotifast` branch:
@@ -40,7 +41,7 @@ Link 1 carries three WP7 commits on the `spotifast` branch:
 | `7bb27c4e5` | keep the cache lock over the whole write, create the directory with one call, read the debug switches before the disable switch |
 | `05178a4f9` | log why the cache is disabled, and label the per-hit timing for the driver compile only |
 
-and five WP8 commits on top of them:
+five WP8 commits on top of them:
 
 | commit | what |
 |---|---|
@@ -50,16 +51,24 @@ and five WP8 commits on top of them:
 | `63a7ba68b` | the writer thread reads each new entry back once, so the antivirus scan of a new file is not paid by the render thread |
 | `d3d81668e` | `TextureManager` rescans the texture folders in the background between preset loads instead of on the render thread at every load |
 
-Link 2 carries four commits: `0b1e4ef` (the submodule change), `ba70411`
-(pointer to `7bb27c4e5`), `8ad31cf` (pointer to `05178a4f9`) and, on
-`wp8-stutter-fixes`, `ea2d84e` (pointer to `d3d81668e`, and `.gitmodules`
-following that branch).
+and one WP11 commit on top of those:
+
+| commit | what |
+|---|---|
+| `8d8daf1f1` | reject entries carry the time they were written (`projectm-shader-reject 2`) and expire after 7 days; a hit no longer touches them, so it extends neither their life nor their LRU recency; an injectable wall clock and four tests |
+
+Link 2 carries five commits: `0b1e4ef` (the submodule change), `ba70411`
+(pointer to `7bb27c4e5`), `8ad31cf` (pointer to `05178a4f9`), on
+`wp8-stutter-fixes` `ea2d84e` (pointer to `d3d81668e`, and `.gitmodules`
+following that branch) and, on `wp11-reject-expiry`, `4a3d3b1` (pointer to
+`8d8daf1f1`, and `.gitmodules` following that branch).
 
 ### What link 1 adds on top of the `spotifast` branch
 
 `crmne/projectm`'s `spotifast` branch (`ffb109857`) is upstream `master` plus
 a length check on HLSL identifiers, kept until projectM releases it. On top of
-that, `wp8-stutter-fixes` adds (the cache itself is WP7's; WP8 changed it and added the rest):
+that, `wp11-reject-expiry` adds (the cache itself is WP7's; WP8 changed it and
+added the rest; WP11 made its reject entries expire):
 
 - `src/libprojectM/MilkdropPreset/ShaderTranspileCache.{hpp,cpp}`: the
   persistent cache, its SHA-256 key, its reject entries and its bounded,
@@ -85,7 +94,7 @@ that, `wp8-stutter-fixes` adds (the cache itself is WP7's; WP8 changed it and ad
 ### What link 2 adds
 
 Only the submodule: `.gitmodules` points at `Errantial/projectm` on
-`wp8-stutter-fixes`, and the recorded gitlink is link 1's commit. Its own base
+`wp11-reject-expiry`, and the recorded gitlink is link 1's commit. Its own base
 is `crmne/projectm-rs` `respect-cmake-generator` (`93852ff`), which Spotifast
 needed before this branch for the CMake generator and the vcpkg triplet the
 `projectm-sys` build script chooses.
@@ -94,12 +103,12 @@ needed before this branch for the CMake generator and the vcpkg triplet the
 
 Always work from the oldest link up, and never rewrite a published commit.
 
-1. In a checkout of `Errantial/projectm` on `wp8-stutter-fixes`, make the
+1. In a checkout of `Errantial/projectm` on `wp11-reject-expiry`, make the
    libprojectM change, build it through Spotifast, commit and push.
-2. In a checkout of `Errantial/projectm-rs` on `wp8-stutter-fixes`:
+2. In a checkout of `Errantial/projectm-rs` on `wp11-reject-expiry`:
 
    ```sh
-   git -C projectm-sys/libprojectM fetch origin wp8-stutter-fixes
+   git -C projectm-sys/libprojectM fetch origin wp11-reject-expiry
    git -C projectm-sys/libprojectM checkout <new projectm commit>
    git add projectm-sys/libprojectM && git commit && git push
    ```
@@ -126,6 +135,15 @@ The cache's own tests (`ShaderTranspileCacheTest.cpp`) build in libprojectM's
 it off, so on this laptop they were built and run on their own against
 vcpkg's GoogleTest (`TRANSPILE-CACHE.md`, "Checks").
 
+## The dependency check
+
+`.github/scripts/check-dependency-sources.py` accepts crates.io and
+repositories under `github.com/crmne/`. `Errantial/projectm-rs` is the one
+other repository it accepts, through its `FORK_PINS` list, because link 2 is a
+fork pin and not a source of its own. When the chain is dropped (below), remove
+that entry in the same change that replaces the pin. Link 1 is not named in
+`Cargo.toml` or `Cargo.lock`, only link 2's submodule is.
+
 ## Dropping it
 
 The fork exists only until projectM carries the cache itself. Then:
@@ -137,6 +155,6 @@ The fork exists only until projectM carries the cache itself. Then:
    replace the `Cargo.toml` override with the crates.io version and delete
    this file.
 
-Nothing outside `Cargo.toml`, this file and `TRANSPILE-CACHE.md` refers to
-these repositories, and Spotifast itself needs no code change to use or stop
+Nothing outside `Cargo.toml`, `check-dependency-sources.py`, this file and
+`TRANSPILE-CACHE.md` refers to these repositories, and Spotifast itself needs no code change to use or stop
 using them.

@@ -348,12 +348,14 @@ cpal = { git = "https://github.com/crmne/cpal", rev = "fcd8b6ebee9d822426fa8d683
 # which GitHub's windows-latest images no longer carry; the fork lets an
 # explicit CMAKE_GENERATOR win, and asks vcpkg for the target's architecture
 # so libprojectM links for Windows on ARM. Its libprojectM comes from
-# Errantial/projectm's wp8-stutter-fixes branch (see PROJECTM-FORK.md): the
+# Errantial/projectm's wp11-reject-expiry branch (see PROJECTM-FORK.md): the
 # crmne/projectm spotifast branch, which adds a length check on HLSL
 # identifiers, plus an on-disk cache for the HLSL-to-GLSL transpile of preset
-# shaders and texture folder rescans off the render thread. Drop each when
-# upstream releases it.
-projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "ea2d84ec529302f20e6cd456e162f894efe8c3df" }
+# shaders (its reject entries expire after 7 days) and texture folder rescans
+# off the render thread. A fork pin, listed in
+# .github/scripts/check-dependency-sources.py; replace it with an upstream rev
+# once the cache is upstreamed, and drop each fix when upstream releases it.
+projectm-sys = { git = "https://github.com/Errantial/projectm-rs", rev = "4a3d3b1379d02e8365c23598cdb4700acac45ea0" }
 # hyper-proxy2's unreleased rustls 0.23 update plus our upstream provider
 # compatibility fix. Drop this fork when a release includes both changes.
 hyper-proxy2 = { git = "https://github.com/crmne/hyper-proxy2", rev = "efca4811371ddae81c06be168de54194938d70b1" }

@@ -105,11 +105,28 @@ each re-transpiled (about 15 to 65 ms) and failing again in the driver (30 to
   GPU/PCIe/SSE2 | 3.3.0 NVIDIA 617.14 | 3.30 NVIDIA via Cg compiler`. A driver
   update changes `GL_VERSION`, so every reject entry of the old driver stops
   matching and the shader is tried again.
-- The file holds three lines: `projectm-shader-reject 1`, the driver line,
-  and where it failed with the first line of the error
-  (`driver: [Shader] Error compiling fragment shader: 0(131) : error C1068:
-  array index out of bounds`). A lookup only counts if the first two lines
-  match exactly; anything else is a miss and the shader is tried in full.
+- The file holds four lines: `projectm-shader-reject 2`, the driver line,
+  `written <seconds>` (the Unix time it was written), and where it failed with
+  the first line of the error (`driver: [Shader] Error compiling fragment
+  shader: 0(131) : error C1068: array index out of bounds`). A lookup only
+  counts if the first two lines match exactly and the date parses; anything
+  else is a miss and the shader is tried in full.
+- **Expiry.** An entry is trusted for 7 days
+  (`ShaderTranspileCache::RejectLifetimeSeconds`) after it was written, so a
+  shader the driver refused is tried once more even on an unchanged driver
+  string, for example after a fix in the transpiler that did not bump the
+  format version. An expired entry is a miss and is removed by the background
+  thread; if the retry fails again a new entry, dated then, lives another 7
+  days. A hit does not extend that life: it does not refresh the entry's
+  modification time either, so reject entries are not kept alive in the LRU
+  order by being used (GLSL entries still are). An entry dated more than an
+  hour in the future (the clock was set back) is treated as expired, and a
+  format 1 entry, which has no date, is a miss and is replaced by a dated one
+  on its next failure. The entry is still keyed on the driver strings, so a
+  driver update does not wait for the 7 days. The age is read from the file's
+  own date, not its modification time, so copying or restoring a cache
+  directory does not renew entries. `PROJECTM_SHADER_CACHE_DEBUG=1` logs each
+  expiry and counts them as `rejects-expired` in the summary.
 - A reject hit logs `[MilkdropShader] Skipping <type> shader this driver
   rejected before: <reason>` at error level, where the full compile used to
   log the driver's error, and throws. The warp shader is then dropped and the
@@ -147,7 +164,8 @@ each re-transpiled (about 15 to 65 ms) and failing again in the driver (30 to
   recently used entries are deleted until the directory is at 90% of the
   budget, so a full cache is not pruned again on the next store. There is no
   entry count limit any more.
-- **Least recently used.** An entry's modification time is the time of its
+- **Least recently used.** (Reject entries are the exception: a hit does not
+  touch them, see Expiry above.) An entry's modification time is the time of its
   last use. A store sets it; a hit asks the worker to set it to now
   (`std::filesystem::last_write_time`), at most once per entry every ten
   minutes per process. The render thread only does a map lookup for that.
@@ -890,10 +908,36 @@ which is noise on this laptop).
   entry): it fails there ("the entry that was just used was pruned") and
   passes on the real code.
 - Verify mode, the damaged cache and two processes on one directory: above.
-- `.github/scripts/check-dependency-sources.py` fails on this branch, as it
-  already did on `wp7-transpile-cache`: it only accepts `github.com/crmne/`,
-  and the fork chain lives under `github.com/Errantial/`, which this work may
-  not push to crmne. That needs the maintainer.
+- `.github/scripts/check-dependency-sources.py` accepts the fork chain's
+  `Errantial/projectm-rs` pin through its `FORK_PINS` list (it only accepted
+  `github.com/crmne/` before and failed on this work). The entry is a fork pin
+  to be replaced by an upstream rev once the cache is upstreamed. Every other
+  owner, repository, scheme and look-alike path still fails; the policy tests
+  (`.github/scripts/test-policy-checks.py`) cover both directions.
+
+### Reject entry expiry (WP11)
+
+The cache's tests grew four for the expiry (ten in all), run with an
+injectable wall clock so none of them sleeps: an entry is trusted until exactly
+7 days after it was written and not a second longer, and a fresh failure
+writes a new entry with a new 7 days; a reject entry that is hit every day
+keeps its modification time and still expires on the 7th day; an entry dated
+in the future, an undated format 1 entry and a garbled date are misses.
+
+They were built on Linux (aarch64, GCC 11.5, `-std=c++17 -Wall -Wextra`, no
+warnings) against googletest 1.14 with `ShaderTranspileCache.cpp` alone (it
+needs no GL), not through CMake, and nine of the ten pass. The tenth,
+`AStoreHitsBeforeAndAfterItIsWritten`, already fails the same way on the
+unchanged `wp8-stutter-fixes` source in 5 of 5 runs here ("a queued discard
+still hit": `Lookup` reads the file that is still on disk while the discard is
+queued; the test needs the discard to win that race, and passed on Windows).
+It is not part of this change and was left alone. Two deliberate breaks of the
+code were both caught: a reject hit that touches the entry again fails the
+"does not extend" test, and a longer lifetime fails the expiry test. A
+reject-entry hit-path break only shows when the entry was not written by the
+same process (a worker throttle skips the touch of an entry it just wrote), so
+that test places the entry as another process would. The GL side
+(`MilkdropShader`'s calls) did not change and was not rebuilt or run.
 
 ## What was not compiled
 
@@ -923,7 +967,14 @@ Linux were not compiled. The WP8 C++ is written to be portable:
 - **A reject entry for a shader that would compile now.** Only possible if the
   driver strings stay the same while the driver's verdict changes, or if the
   key misses an input. Verify mode re-checks every reject entry and found
-  none; deleting `*.reject` (or the directory) clears them.
+  none; deleting `*.reject` (or the directory) clears them. Such an entry now
+  lasts at most 7 days (Expiry, above).
+- **The weekly retry.** Once a week per rejected shader, the first load of its
+  preset pays the full transpile and the failed driver compile again (WP7
+  measured about 15 to 65 ms and 30 to 80 ms), the stutter the reject entry
+  exists to avoid, and then a new entry is written. With six such shaders in
+  200 presets that is at most one such load per shader per week and per
+  machine, on the first visit after the entry expired.
 - **The hit read is still on the render thread.** 0.54 ms at the median,
   1.1 ms worst, once the entry has been opened once. An entry written by a
   process that died before its read-back, or copied in from elsewhere, still
