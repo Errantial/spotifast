@@ -3,8 +3,9 @@
 
 Crates come from crates.io. A git dependency or a [patch] entry may only name
 a repository under https://github.com/crmne/, and adding or changing one needs
-the maintainer's approval (CONTRIBUTING.md, "Pull requests"). This reads every
-tracked Cargo.toml, Cargo.lock and .cargo/config.toml.
+the maintainer's approval (CONTRIBUTING.md, "Pull requests"). The one exception
+is FORK_PINS below. This reads every tracked Cargo.toml, Cargo.lock and
+.cargo/config.toml.
 """
 
 import os
@@ -20,19 +21,39 @@ CRATES_IO = {
 }
 MANIFESTS = ("/Cargo.toml", "/Cargo.lock", "/.cargo/config.toml", "/.cargo/config")
 
+# Intentional fork pins outside https://github.com/crmne/, as (owner, repository).
+# Each is a stopgap, not a source: it carries a fix that is not upstream yet and
+# is to be replaced by an upstream rev (or a crates.io release) once the fix has
+# been upstreamed. Add an entry only with the maintainer's approval, and remove it
+# in the change that replaces the pin.
+FORK_PINS = {
+    # Errantial/projectm-rs carries the libprojectM transpile cache and stutter
+    # fixes (PROJECTM-FORK.md). Fork pin, to be replaced by an upstream rev once
+    # the cache is upstreamed.
+    ("Errantial", "projectm-rs"),
+}
 
-def owned(url):
-    """True for https://github.com/crmne/<repository> and nothing else."""
+
+def repository(url):
+    """Returns (owner, repository) for https://github.com/<owner>/<repository>, else None."""
     parts = urlsplit(url)
     segments = parts.path.strip("/").removesuffix(".git").split("/")
-    return (
+    if (
         parts.scheme == "https"
         and parts.netloc == "github.com"
         and len(segments) == 2
-        and segments[0] == "crmne"
+        and segments[0] not in ("", ".", "..")
         and segments[1] not in ("", ".", "..")
         and "%" not in parts.path
-    )
+    ):
+        return segments[0], segments[1]
+    return None
+
+
+def owned(url):
+    """True for https://github.com/crmne/<repository> and the FORK_PINS repositories."""
+    found = repository(url)
+    return found is not None and (found[0] == "crmne" or found in FORK_PINS)
 
 
 def git_urls(value, table=()):

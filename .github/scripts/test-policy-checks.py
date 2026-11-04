@@ -75,6 +75,27 @@ librespot-core = { git = "https://github.com/crmne/librespot", rev = "23fc42c" }
             found = sources.problems({"Cargo.toml": f'[dependencies]\nlibrespot-core = {{ git = "{url}" }}\n'})
             self.assertEqual(flagged(found), ["Cargo.toml"], url)
 
+    def test_the_listed_fork_pin_passes_and_nothing_else_of_that_owner(self):
+        pin = "https://github.com/Errantial/projectm-rs"
+        manifest = f'[patch.crates-io]\nprojectm-sys = {{ git = "{pin}", rev = "4a3d3b1" }}\n'
+        lock = LOCK.format(source=f"git+{pin}?rev=4a3d3b1#4a3d3b1")
+        self.assertEqual(sources.problems({"Cargo.toml": manifest, "Cargo.lock": lock}), [])
+        self.assertEqual(sources.problems({"Cargo.toml": manifest.replace(pin, pin + ".git")}), [])
+
+        for url in (
+            "https://github.com/Errantial/projectm",
+            "https://github.com/Errantial/spotifast",
+            "https://github.com/errantial/projectm-rs",
+            "https://github.com/Errantial-fork/projectm-rs",
+            "https://github.com/dennisgr7/projectm-rs",
+            "https://github.com/Errantial/projectm-rs/../projectm",
+            "http://github.com/Errantial/projectm-rs",
+        ):
+            found = sources.problems({"Cargo.toml": f'[dependencies]\nprojectm-sys = {{ git = "{url}" }}\n'})
+            self.assertEqual(flagged(found), ["Cargo.toml"], url)
+            found = sources.problems({"Cargo.lock": LOCK.format(source=f"git+{url}?rev=abc#abc")})
+            self.assertEqual(flagged(found), ["Cargo.lock"], url)
+
     def test_patches_from_a_path_or_another_registry_fail(self):
         manifest = """
 [patch.crates-io]
