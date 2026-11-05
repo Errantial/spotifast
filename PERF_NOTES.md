@@ -981,7 +981,7 @@ reject entries re-checked, 0 and 0 mismatches.
 
 Timers inside libprojectM, one instrumented run per build, warm cache, same
 protocol (`wp9/final/diag.out` for WP9; the WP8 side is the earlier
-instrumented WP8 run). The render thread's expression work on a load:
+instrumented WP8 run, whose raw output was not kept). The render thread's expression work on a load:
 
 | per load, render thread (ms) | WP8 p50 / p99 / max | WP9 p50 / p99 / max |
 |---|---:|---:|
