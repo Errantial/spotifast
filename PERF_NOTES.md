@@ -899,3 +899,195 @@ cache it still learns from the uncached first switch: in a two-pass run, pass
 load took under 7 ms. WP10 changed that: a preset needs two switches over
 50 ms in the session to be kept out of automatic play (`TRANSPILE-CACHE.md`,
 "The slow list").
+
+## WP9: expression compiling off the render thread, and the fade's shape draws (RTX 3080 Laptop, 2026-11-04)
+
+Branch `wp8-stutter-fixes` (WP9 merged into it on 2026-11-04), `projectm-sys` pinned to
+Errantial/projectm-rs `474b126` (libprojectM Errantial/projectm `3ca83adaf`, the WP8 line with WP9 and
+WP11 merged).
+`PROJECTM-FORK.md` lists the commits.
+
+What changed:
+
+- **A preset's expression code is compiled before the switch.**
+  `projectm_prepare_preset_data()` parses the preset file and compiles its
+  per-frame, per-pixel, custom wave and custom shape code on the prefetch
+  thread (`src/milkdrop/prefetch.rs`, which already reads the next file
+  while the current one plays). The render thread's load of the same bytes
+  adopts the result. 197 of 197 loads in the instrumented run used one. A
+  preset that does not parse is not kept and loads, and fails, as before.
+- **The start of the per-frame init code runs there too.** WP8's biggest
+  ns-eel cost on the render thread was not compiling but running init code:
+  loops that clear `gmegabuf` a million entries at a time (27 ms at worst in
+  the WP8 split). The leading top-level statements that name no built-in
+  variable except q1 to q32 and do not call `rand()` run on the preparing
+  thread, on the preset's own fresh memory. They see what they would see at
+  the switch. The rest runs at the switch, in order, after the built-in
+  variables were loaded. The split reads the code text (the build links
+  vcpkg's projectm-eval 1.0.5, so the first version, which read the compiled
+  tree, never ran anything ahead). 1,937 of the 10,184 presets have such
+  statements, 278 of them loops. If either half does not compile alone, the
+  whole block runs at the switch.
+- **A custom shape's instances are uploaded once per frame.** Before, each
+  of up to 1,024 instances did its own buffer upload and draw per frame. Now
+  every instance's code runs first, all vertices go up in one upload per
+  buffer, and each instance is drawn from its range with the same blend,
+  shader, texture and attribute state as before.
+
+Measured on the same protocol as WP8 (200 presets, 3 s each, 640x480, soft
+cuts, `--path new`, warm cache in a new process, each run started after the
+CPU stayed under 20% for 20 s). A new binary compiles shaders cold the first
+time because the NVIDIA driver cache is per executable, so each binary had a
+warm-up run first. Runs 3 (WP9) and 1 (WP8) were disturbed by something
+else on the machine (53 and 38 loads over 8 ms, one load of 484 ms) and are
+left out of the table; two more clean runs replaced them. Raw outputs:
+`wp9/final/` on the laptop.
+
+| metric, 200 presets | WP8 warm 2 | WP8 warm 3 | WP8 warm 4 | WP9 warm 1 | WP9 warm 2 | WP9 warm 4 |
+|---|---:|---:|---:|---:|---:|---:|
+| preset load p50 / p99 / max (ms) | 4.7 / 22.0 / 33.5 | 4.8 / 17.4 / 36.4 | 4.8 / 31.0 / 41.0 | 4.2 / 13.2 / 24.8 | 4.2 / 11.6 / 17.8 | 4.0 / 9.6 / 35.2 |
+| loads over 8 ms / over 25 ms | 14 / 2 | 14 / 2 | 12 / 3 | **3 / 0** | **7 / 0** | **4 / 1** |
+| switch cost p50 / p99 (ms) | 9.9 / 37.6 | 9.5 / 41.7 | 9.6 / 43.3 | 9.5 / 28.3 | 9.5 / 22.3 | 8.6 / 25.3 |
+| switch frame p50 / p99 (ms) | 24.6 / 53.1 | 24.4 / 57.6 | 24.4 / 57.3 | 24.2 / 40.0 | 24.2 / 37.8 | 23.7 / 37.8 |
+| worst frame in the 3 s p50 / p99 (ms) | 25.0 / 62.0 | 24.8 / 94.7 | 24.5 / 62.9 | 24.4 / 104.5 | 24.5 / 41.8 | 23.8 / 43.1 |
+| fade frame p99 (ms) | 35.9 | 35.6 | 35.8 | 19.1 | 18.9 | 19.2 |
+| steady frame p99 (ms) | 18.4 | 18.7 | 18.7 | 18.1 | 18.1 | 18.4 |
+| fade p99 / steady p99 | 1.95x | 1.90x | 1.91x | **1.06x** | **1.04x** | **1.04x** |
+| frame rate | 58.6 fps | 58.6 fps | 58.7 fps | **59.7 fps** | **59.8 fps** | **59.7 fps** |
+| all 200 loads together | 1.06 s | 1.05 s | 1.07 s | 0.87 s | 0.84 s | 0.84 s |
+
+The 104.5 ms worst frame in WP9 warm 1 is one 250 ms frame in the middle of
+one preset's turn (292.milk, in its steady part), not a switch cost; WP8
+warm 3 has the same kind of outlier (94.7 ms).
+
+Cache off (every shader transpiled on the render thread, three runs each,
+alternating, same day):
+
+| metric | WP8 off 1 / 2 / 3 | WP9 off 1 / 2 / 3 |
+|---|---|---|
+| preset load p50 / p99 (ms) | 135.0 / 220.7, 130.6 / 227.9, 135.1 / 232.7 | 160.3 / 280.8, 138.1 / 222.5, 146.3 / 257.0 |
+| switch frame p50 / p99 (ms) | 154.9 / 238.6, 150.9 / 244.6, 155.6 / 258.7 | 181.2 / 345.1, 158.3 / 242.2, 165.6 / 279.0 |
+| fade p99 / steady p99 | 1.92x, 1.90x, 1.87x | 1.08x, 1.05x, 1.07x |
+| frame rate | 56.3, 56.4, 56.3 fps | 56.8, 57.4, 57.3 fps |
+
+With the cache off, WP9's loads are slower at the median (146.3 against 135.0
+ms, the median of three runs, 8% more; the first run was 19% more). I did not
+find the cause. The transpile dominates a cache-off load, nothing in WP9
+touches it, and the default is the cache on, so this does not affect the
+numbers above. It is an open question.
+
+Verify mode (`PROJECTM_SHADER_CACHE_VERIFY=1`): 313 hits re-transpiled and 6
+reject entries re-checked, 0 and 0 mismatches.
+
+### Where the time goes (instrumented build, not committed)
+
+Timers inside libprojectM, one instrumented run per build, warm cache, same
+protocol (`wp9/final/diag.out` for WP9; the WP8 side is the earlier
+instrumented WP8 run, whose raw output was not kept). The render thread's expression work on a load:
+
+| per load, render thread (ms) | WP8 p50 / p99 / max | WP9 p50 / p99 / max |
+|---|---:|---:|
+| parse the preset file | 0.22 / 1.09 / 24.4 | 0.00 / 0.00 / 0.00 |
+| ns-eel (rest of init, wave and shape init) | 0.54 / 29.07 / 76.3 | 0.00 / 0.43 / 1.32 |
+| init code run (per-frame init, gmegabuf loops) | 0.00 / 10.4 / 27.1 | 0.00 / 0.00 / 0.00 |
+| all of the load | 4.91 / 37.72 / 153.96 | 4.27 / 9.18 / 20.57 |
+
+The same work on the prefetch thread, per preset (parse, compile and the
+independent init statements): p50 1.68, p99 17.8, max 37.2 ms. It finishes
+well inside the 3 s a preset plays.
+
+What is left in a load is GL work: in the 6 loads over 8 ms of that run the
+warp and composite program compile and link took 0.8 to 18.2 ms (one preset
+spent 18.2 ms in the warp program's first compile in the process), the
+framebuffers 0.5 ms and the initial image 0.4 to 3.3 ms.
+
+A frame, CPU time in `RenderFrame` (ms):
+
+| | WP8 p50 / p99 | WP9 p50 / p99 |
+|---|---:|---:|
+| steady frame | 1.43 / 15.16 | 1.58 / 9.17 |
+| fade frame (both presets) | 3.07 / 19.84 | 3.31 / 13.19 |
+| the transition draw | 0.04 / 0.12 | 0.04 / 0.27 |
+| custom shape draw, one preset, p99 | 13.3 | 7.0 |
+
+The slowest 1% of fade frames average 34.0 ms in the WP8 split (25.2 of it
+in shape GL calls) and 14.6 ms in WP9 (shape GL calls 7.9, shape code 1.8,
+per-frame code 1.0, per-vertex code 0.8, composite 0.6, blur 0.3, warp draw
+0.3). During a fade the GPU takes 2.7 ms at the median and 10.1 at the p99
+(steady: 1.2 and 5.9), so the GPU is not what limits a fade frame. WP9's
+`waveform` timer (the main waveform draw) reads p99 2.26 ms against 0.09 in
+WP8. The driver most likely charges queued work to whichever GL call comes
+next; the frame total is lower in WP9, but I did not isolate it.
+
+### Same output, checked
+
+`examples/milkdrop_evalcheck.rs` draws a sample of presets with hard cuts,
+a fixed frame clock and the same synthetic audio every run, and a build with
+the hue offsets and random textures pinned. Each preset is prepared on a
+spawned thread first, as the prefetch does. Old (WP8 plus the same hooks)
+against new (WP9), 90 frames each:
+
+- 60 presets sampled by stride from the 10,184 and 40 presets chosen for
+  init loops that now run ahead: every per-frame variable (the q variables,
+  built-in outputs, registers), every warp mesh vertex, every waveform point
+  and every shape instance's vertices and colours are identical, run for run
+  (3 old and 3 new runs on the first set, 2 and 2 on the second).
+- Pixels: a preset draws slightly differently from run to run in WP8 too
+  (undefined texture contents and similar), so a pixel hash only means
+  something where WP8 repeats itself. 19 of the 60 and 15 of the 40 presets
+  are pixel-stable across WP8 runs, and all 34 are identical in WP9. They
+  include textured shapes, bordered shapes and shapes with 512 and 1,024
+  instances. The shipped build without the hooks was also run once; it
+  differs from the old build on 15 of the 19 stable presets. It has no
+  pinned seeds, which would explain that, but I did not run it twice to
+  confirm, so the comparison above is the pinned one only.
+- A bug found on the way: a custom waveform whose `sep` is larger than the
+  samples it leaves reads before the audio arrays (an existing out-of-bounds
+  read in libprojectM, onto `frameQVariables` and `globalRegisters`).
+  Moving the registers out of `PresetState` changed what such a wave drew
+  (`shiter redi jedi- agar awkward seances qaent possibly mbattre.milk`).
+  `PresetState` now keeps its original layout, and a prepared preset's
+  registers are mirrored into it before waveform code reads audio.
+- `InitCodeSplitTest.cpp`, 7 tests, passes against the projectm-eval 1.0.5
+  sources (built and run on its own; `projectm-sys` builds without tests).
+
+### Against the criteria (warm cache)
+
+| criterion | result |
+|---|---|
+| worst frame at a switch p99 <= 25 ms | **not met**: the switch frame is 37.8 to 40.0 ms at the p99 and 23.7 to 24.2 at the p50 (WP8: 53.1 to 57.6 and 24.4 to 24.6); the worst frame in the 3 s is 41.8 to 104.5 ms at the p99 (WP8: 62.0 to 94.7). The frame is about 15 ms of frame pacing plus the load (p99 9.6 to 13.2 ms) plus the first draw, which is a fade frame of two presets with new programs (p50 5.3 ms, p99 17.1 in one run) |
+| fade p99 <= 1.25x steady p99 | **met**: 1.04x to 1.06x (WP8 1.90x to 1.95x) |
+| >= 58 fps | **met**: 59.7 to 59.8 fps (WP8 58.6 to 58.7) |
+| no load blocking the render thread > 8 ms | **not met**: 3, 7 and 4 of 200 (WP8 14, 14, 12). ns-eel is no longer in it (p99 0.43 ms, max 1.32); what is left is the driver's compile of the warp and composite programs and the initial image |
+| verify, 0 mismatches | **met** |
+
+### Left, and what it would take
+
+- The load over 8 ms is now the driver compiling GLSL, which libprojectM
+  cannot do ahead of time on another thread without a shared GL context.
+  Compiling on a second context is possible and would change how projectM
+  owns its GL objects; I did not start it.
+- The first draw of a fade is two presets' per-frame work. Shape GL calls
+  are still the largest part (7.9 of 14.6 ms in the slowest 1%). Drawing a
+  shape's instances with one multi-draw call where their state is equal
+  would not change the picture; I did not do it.
+- These would shorten a fade or a switch but show something different, so I
+  did not do them: draw the outgoing preset every second frame during a
+  fade (its `RenderFrame` is 8.9 ms of the 13.2 ms p99 fade frame; I did not
+  measure the saving), skip the outgoing preset's custom shapes (shape GL is
+  about half of the slowest fade frames), or render a fade at a lower
+  resolution. The governor already does a version of the last one.
+- Not compiled or run: macOS and Linux. The libprojectM changes use only the
+  standard library (`std::mutex`, `std::deque`, `std::unordered_set`) and
+  the Rust change has no `cfg`, but only Windows was built.
+- Risks: the compile on another thread relies on projectm-eval's parser being
+  re-entrant. That holds for 1.0.5, which this build links (I read its
+  scanner and parser); a build against the older vendored projectm-eval was
+  not checked. The init statements that run ahead exclude `rand()` because
+  its generator state is global, and nothing else in projectm-eval is
+  non-deterministic. The layout-keeping mirror exists only for the
+  out-of-bounds read above.
+- A person should look at: custom-shape presets during a fade, next to a WP8
+  build (their instances now draw from one upload; the check says the same
+  vertices and the same pixels where WP8 repeats itself), and a preset with
+  a large `sep` custom waveform.

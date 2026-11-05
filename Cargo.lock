@@ -2907,7 +2907,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -5070,7 +5070,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 [[package]]
 name = "projectm-sys"
 version = "1.2.3"
-source = "git+https://github.com/Errantial/projectm-rs?rev=4a3d3b1379d02e8365c23598cdb4700acac45ea0#4a3d3b1379d02e8365c23598cdb4700acac45ea0"
+source = "git+https://github.com/Errantial/projectm-rs?rev=474b126cbc845d3f7124245eb020362b67dbd02f#474b126cbc845d3f7124245eb020362b67dbd02f"
 dependencies = [
  "bindgen 0.70.1",
  "cmake",
@@ -6542,7 +6542,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

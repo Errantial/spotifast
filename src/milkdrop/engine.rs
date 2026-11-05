@@ -187,6 +187,27 @@ impl Engine {
         true
     }
 
+    /// Parses a preset and compiles its expressions ahead of its switch, on
+    /// any thread, so a later [`Engine::load_data`] with the same bytes skips
+    /// that work. The preset plays exactly as if it had not been prepared;
+    /// bytes that do not parse, or that are never loaded, change nothing.
+    pub fn prepare_data(data: &[u8]) {
+        let Ok(data) = CString::new(data) else {
+            return;
+        };
+        // SAFETY: a string that lives for the call; projectM documents this
+        // function as safe on any thread and needs no instance for it.
+        unsafe { pm::projectm_prepare_preset_data(data.as_ptr()) };
+    }
+
+    /// Pins the time projectM gives presets to `seconds` since the first
+    /// frame instead of the wall clock, for checks that must draw the same
+    /// frames on every run.
+    pub fn set_frame_time(&mut self, seconds: f64) {
+        // SAFETY: a live handle.
+        unsafe { pm::projectm_set_frame_time(self.handle, seconds) };
+    }
+
     /// Names the preset a load from memory is for, so a failure it reports
     /// with no filename can still say which one.
     fn remember_loading(&self, path: Option<&Path>) {

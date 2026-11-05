@@ -4,12 +4,16 @@
 //! that parses it and compiles its shaders. The read is the part that can
 //! happen earlier: [`Presets::lookahead`](super::Presets::lookahead) knows
 //! the next preset before the switch, so a worker thread reads its bytes and
-//! the render thread only parses them.
+//! hands them to projectM to parse and compile ahead
+//! ([`Engine::prepare_data`]); the render thread's load of the same bytes
+//! then takes that work over.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
+
+use super::engine::Engine;
 
 /// The file read ahead, and the thread that reads it.
 pub struct Prefetch {
@@ -41,7 +45,13 @@ impl Prefetch {
                     while let Ok(newer) = asked.try_recv() {
                         path = newer;
                     }
-                    if read.send((path.clone(), bytes(&path))).is_err() {
+                    let read_ahead = bytes(&path);
+                    if let Ok(data) = &read_ahead {
+                        // The expensive part of a switch that needs no GL:
+                        // done here, while the playing preset draws.
+                        Engine::prepare_data(data);
+                    }
+                    if read.send((path.clone(), read_ahead)).is_err() {
                         break;
                     }
                 }
