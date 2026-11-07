@@ -28,7 +28,10 @@ use winit::window::{Fullscreen, ResizeDirection, Window, WindowId};
 
 use super::engine::Engine;
 use super::overlay::{Backing, Overlay, Place, Row, Span};
+use super::policy::{MAX_SCALE, Policy};
+use super::prefetch::Prefetch;
 use super::shm::Ring;
+use super::trace::{self, Trace};
 use super::{DEFAULT_FPS, DEFAULT_SECONDS, LAG, MIN_SIZE, Presets, Request};
 
 /// What the child is told to do, on stdin, as one JSON object per line.
@@ -197,10 +200,14 @@ struct Child {
     ring: Ring,
     cursor: u64,
     presets: Presets,
+    /// The next preset's file, read while this one plays.
+    prefetch: Prefetch,
     live: Option<Live>,
     song: Option<Vec<String>>,
     /// When the last frames were drawn, for the count D shows.
     drawn: Vec<Instant>,
+    /// Load and frame times per switch, when the environment asks for them.
+    trace: Trace,
     /// Whether the keys are what is on show, so the same key hides them.
     showing_keys: bool,
     /// Song-title display mode.
@@ -215,6 +222,9 @@ struct Child {
     /// Current screen refresh rate, when reported.
     screen_hz: Option<f32>,
     scale: u32,
+    /// Whether a fade has to be drawn with less detail than the setting asks
+    /// for to keep the frame rate.
+    policy: Policy,
     seconds: u32,
     pointer: PhysicalPosition<f64>,
     last_click: Option<Instant>,
@@ -240,9 +250,11 @@ impl Child {
             ring,
             cursor: 0,
             presets: Presets::new(),
+            prefetch: Prefetch::start(),
             live: None,
             song: None,
             drawn: Vec::new(),
+            trace: Trace::default(),
             showing_keys: false,
             song_shown: SongShown::OnChange,
             preset_on: false,
@@ -253,6 +265,7 @@ impl Child {
             modifiers: winit::keyboard::ModifiersState::empty(),
             fps,
             scale,
+            policy: Policy::new(scale, fps),
             seconds,
             pointer: PhysicalPosition::new(0.0, 0.0),
             last_click: None,
@@ -353,25 +366,41 @@ impl Child {
     }
 
     fn render(&mut self) {
+        if self.live.is_none() {
+            return;
+        }
+        let started = Instant::now();
+        // Read before `prepare_frame` moves the presets on: a fade that
+        // begins with this frame is measured from the one after it, so the
+        // preset load itself is not mistaken for the fade being too heavy.
+        // A frame that does load one is told apart at the end, where the
+        // governor is given the frame.
+        let frame = self.policy.begin(&self.presets, started);
         let Some(live) = &mut self.live else {
             return;
         };
-        prepare_frame(
+        let mut loaded = prepare_frame(
             &mut live.engine,
             &mut self.presets,
             &self.args.presets,
             self.seconds,
             &self.ring,
             &mut self.cursor,
+            &mut self.prefetch,
         );
+        // Only a switch pays for these two clock reads, and the first draw
+        // is where the driver compiles the new preset's shaders.
+        let draw_started = loaded.is_some().then(Instant::now);
         let size = live.window.inner_size();
-        live.engine.render(
-            0,
-            0,
-            size.width.max(1),
-            size.height.max(1),
-            self.scale.max(1),
-        );
+        live.engine
+            .render(0, 0, size.width.max(1), size.height.max(1), frame.scale);
+        let first_draw = draw_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        if let Some(loaded) = &mut loaded {
+            loaded.first_draw = first_draw;
+            self.trace.note(loaded.clone());
+        }
         if let Some(overlay) = &mut live.overlay {
             overlay.draw(&live.gl, (size.width, size.height));
         }
@@ -381,10 +410,19 @@ impl Child {
         if self.drawn.len() >= 60 {
             self.drawn.remove(0);
         }
-        self.drawn.push(Instant::now());
+        let now = Instant::now();
+        self.drawn.push(now);
+        self.trace.frame(now);
         if let Err(error) = live.surface.swap_buffers(&live.context) {
             eprintln!("MilkDrop: present failed: {error}");
         }
+        self.policy.ended(
+            &mut self.presets,
+            &frame,
+            loaded.as_ref(),
+            first_draw,
+            Instant::now(),
+        );
         self.update_corners();
         self.report_geometry();
     }
@@ -468,7 +506,8 @@ impl ApplicationHandler<Control> for Child {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, control: Control) {
         if let Some(scale) = control.scale {
-            self.scale = scale.clamp(1, 4);
+            self.scale = scale.clamp(1, MAX_SCALE);
+            self.policy.set_scale(self.scale);
         }
         if let Some(song) = control.song
             && self.song.as_ref() != Some(&song)
@@ -482,6 +521,7 @@ impl ApplicationHandler<Control> for Child {
         }
         if let Some(fps) = control.fps {
             self.fps = fps;
+            self.policy.set_fps(fps);
         }
         if let Some(seconds) = control.seconds {
             self.seconds = seconds;
@@ -955,28 +995,88 @@ fn frames_per_second(drawn: &[Instant]) -> f32 {
     (drawn.len() - 1) as f32 / span.as_secs_f32()
 }
 
+/// What [`prepare_frame`] asks of the engine, so a test can stand in for it
+/// without a window or a GL context.
+pub trait Loads {
+    fn set_seconds(&mut self, seconds: u32);
+    fn load_data(&mut self, path: &std::path::Path, data: Vec<u8>, smooth: bool) -> bool;
+    fn load(&mut self, path: &std::path::Path, smooth: bool);
+    fn feed_frames(&mut self, frames: &[[f32; 2]]);
+}
+
+impl Loads for Engine {
+    fn set_seconds(&mut self, seconds: u32) {
+        Engine::set_seconds(self, seconds);
+    }
+
+    fn load_data(&mut self, path: &std::path::Path, data: Vec<u8>, smooth: bool) -> bool {
+        Engine::load_data(self, path, data, smooth)
+    }
+
+    fn load(&mut self, path: &std::path::Path, smooth: bool) {
+        Engine::load(self, path, smooth);
+    }
+
+    fn feed_frames(&mut self, frames: &[[f32; 2]]) {
+        Engine::feed_frames(self, frames);
+    }
+}
+
 /// What every frame does before drawing, window or not: moves through the
 /// presets and hands the engine the sound since the last frame. Done each
-/// frame, so a finished listing is picked up without a wake.
-pub(super) fn prepare_frame(
-    engine: &mut Engine,
+/// frame, so a finished listing is picked up without a wake. Returns the
+/// preset it loaded, and how long that took, when one was due.
+///
+/// The load is timed on every switch. Two clock reads are cheaper than a
+/// wrong picture: the slow-preset list and the fade governor both judge this
+/// frame by its cost, and they run in ordinary sessions, where the trace's
+/// report is switched off. [`trace`] only decides whether the numbers are
+/// printed.
+pub fn prepare_frame(
+    engine: &mut impl Loads,
     presets: &mut Presets,
     folder: &std::path::Path,
     seconds: u32,
     ring: &Ring,
     cursor: &mut u64,
-) {
+    prefetch: &mut Prefetch,
+) -> Option<trace::Loaded> {
     presets.refresh(folder, None);
     if presets.current().is_none() && presets.count() > 0 {
         presets.next(false);
     }
     presets.advance(Instant::now(), seconds);
     engine.set_seconds(seconds);
-    if let Some(Request::Load { path, smooth }) = presets.take_request() {
-        engine.load(&path, smooth);
-    }
+    let loaded = match presets.take_request() {
+        Some(Request::Load { path, smooth }) => {
+            let started = Instant::now();
+            // The file is read ahead, so a switch only parses it and
+            // compiles its shaders. A miss reads the file here, as it
+            // always did.
+            match prefetch.take(&path) {
+                Some(data) => {
+                    if !engine.load_data(&path, data, smooth) {
+                        engine.load(&path, smooth);
+                    }
+                }
+                None => engine.load(&path, smooth),
+            }
+            Some(trace::Loaded {
+                path,
+                smooth,
+                took: started.elapsed(),
+                // The first draw comes after this, in the caller.
+                first_draw: Duration::ZERO,
+            })
+        }
+        None => None,
+    };
+    // Read the preset the next change will play while this one is on
+    // screen.
+    prefetch.want(presets.lookahead());
     let frames = ring.since(cursor, LAG);
     engine.feed_frames(&frames);
+    loaded
 }
 
 /// The window's size in pixels, which the overlay lays itself out for.
@@ -1260,6 +1360,78 @@ mod tests {
         assert!(
             (fps - 50.0).abs() < 0.001,
             "twenty milliseconds a frame is fifty a second, not {fps}"
+        );
+    }
+
+    /// An engine that only counts what it is asked to do, so the frame's
+    /// switching work can be tested without a window or a GL context.
+    struct SlowLoad {
+        loads: usize,
+    }
+
+    impl Loads for SlowLoad {
+        fn set_seconds(&mut self, _seconds: u32) {}
+
+        fn load_data(&mut self, _path: &std::path::Path, _data: Vec<u8>, _smooth: bool) -> bool {
+            // A miss, so the fallback that reads the file is what pays.
+            false
+        }
+
+        fn load(&mut self, _path: &std::path::Path, _smooth: bool) {
+            self.loads += 1;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        fn feed_frames(&mut self, _frames: &[[f32; 2]]) {}
+    }
+
+    /// The frame that loads a preset is timed even with the trace switched
+    /// off: the slow-preset list and the fade governor read that number in
+    /// ordinary sessions. Gating the clock reads on the trace used to leave
+    /// both of them inert, and no test saw it because each was only tested
+    /// on its own.
+    #[test]
+    fn a_load_is_timed_with_the_trace_switched_off() {
+        let dir = std::env::temp_dir().join(format!(
+            "spotifast-milkdrop-load-timing-{}-{}",
+            std::process::id(),
+            NEXT_RING.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("a place for the test's preset");
+        let preset = dir.join("a.milk");
+        std::fs::write(&preset, b"[preset00]\n").expect("a preset to load");
+        let ring = Ring::create(&dir.join("ring")).expect("a ring to read");
+
+        let mut presets = Presets::new();
+        presets.files = vec![preset.clone()];
+        presets.next(true);
+        let mut prefetch = Prefetch::start();
+        let mut engine = SlowLoad { loads: 0 };
+        let mut cursor = 0;
+        let loaded = prepare_frame(
+            &mut engine,
+            &mut presets,
+            &dir,
+            10,
+            &ring,
+            &mut cursor,
+            &mut prefetch,
+        )
+        .expect("a load is reported to the frame's own rules");
+        drop(prefetch);
+        std::fs::remove_dir_all(&dir).expect("the test's files");
+
+        assert_eq!(engine.loads, 1, "the preset was loaded once");
+        assert_eq!(loaded.path, preset);
+        assert!(
+            loaded.took >= Duration::from_millis(4),
+            "the load was not timed: {:?}",
+            loaded.took
+        );
+        assert_eq!(
+            loaded.switch_cost(),
+            loaded.took,
+            "no first draw is known before the caller draws"
         );
     }
 }

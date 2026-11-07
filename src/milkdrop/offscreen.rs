@@ -19,7 +19,9 @@ use super::Presets;
 use super::child::{Args, prepare_frame};
 use super::engine::Engine;
 use super::frames::Frames;
+use super::prefetch::Prefetch;
 use super::shm::Ring;
+use super::trace::Trace;
 
 /// How long the app may go without showing the picture before the child
 /// leaves by itself. Longer than the app's own wait before it stops the child
@@ -40,6 +42,9 @@ struct Pump {
     frames: Frames,
     folder: PathBuf,
     presets: Presets,
+    /// Load and frame times per switch, when the environment asks for them.
+    trace: Trace,
+    prefetch: Prefetch,
     closing: Arc<AtomicBool>,
     beats: u64,
     watched: Instant,
@@ -57,6 +62,8 @@ impl Pump {
             frames,
             folder: args.presets.clone(),
             presets: Presets::new(),
+            trace: Trace::default(),
+            prefetch: Prefetch::start(),
             closing,
             beats: 0,
             watched: Instant::now(),
@@ -104,24 +111,42 @@ impl Pump {
         if self.presets.current().is_none() && self.presets.count() > 0 {
             self.presets.next(true);
         }
-        prepare_frame(
+        let loaded = prepare_frame(
             engine,
             &mut self.presets,
             &self.folder,
             self.seconds,
             &self.ring,
             &mut self.cursor,
+            &mut self.prefetch,
         );
+        // Only a switch pays for these two clock reads, and the first draw
+        // is where the driver compiles the new preset's shaders.
+        let draw_started = loaded.is_some().then(Instant::now);
         // Nothing to draw for until the app has measured its pane, and
         // nothing worth showing before a preset plays.
-        if let Some(size) = self.frames.wanted()
+        let drew = if let Some(size) = self.frames.wanted()
             && self.presets.current().is_some()
         {
             self.frames
                 .publish(size, |pixels| engine.render_into(size[0], size[1], pixels));
+            true
+        } else {
+            false
+        };
+        if let Some(mut loaded) = loaded {
+            // Nothing drawn on the load frame keeps the load alone; the
+            // pane is only ever in that state before its first picture.
+            if drew && let Some(started) = draw_started {
+                loaded.first_draw = started.elapsed();
+            }
+            self.presets
+                .record_switch(&loaded.path, loaded.switch_cost());
+            self.trace.note(loaded);
         }
         let interval = Duration::from_secs_f32(1.0 / self.fps.max(1) as f32);
         let now = Instant::now();
+        self.trace.frame(now);
         self.due = (self.due + interval).max(now);
     }
 }

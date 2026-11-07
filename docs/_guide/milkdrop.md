@@ -40,7 +40,9 @@ locked.
 ## Presets
 
 Each visual design is called a **preset**. They change every ten seconds by
-default; choose a different interval in Settings.
+default; choose a different interval in Settings. A preset whose first frame
+takes too long to draw is passed over when presets change on their own, so it
+does not interrupt the picture; **N** and **P** still play it.
 
 On first use, Spotifast automatically downloads the 550 MilkDrop 2 presets
 and the 9,800-preset Cream of the Crop pack. You can download either pack
